@@ -1,0 +1,2212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SuperOS-606 Pattern Editor</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --black:   #000000;
+      --white:   #ffffff;
+      --gray-1:  #f2f2f2;
+      --gray-2:  #e0e0e0;
+      --gray-3:  #b0b0b0;
+      --gray-4:  #606060;
+      --red:     #cc0000;
+      --rule:    2px solid #000;
+      --rule-sm: 1px solid #000;
+      --font: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --mono: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --pad: clamp(10px, 2.5vw, 16px);
+    }
+
+    html { background: var(--white); color: var(--black); font-family: var(--font); font-size: 14px; -webkit-font-smoothing: antialiased; }
+    body { min-height: 100vh; margin: 0; overflow-x: hidden; }
+    .app {
+      padding: var(--pad) var(--pad) clamp(16px, 3vw, 48px);
+      max-width: 1400px;
+      margin: 0 auto;
+      min-width: 0;
+    }
+
+    /* ── Header ── */
+    .header {
+      display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+      gap: 4px 20px; padding-bottom: 10px; border-bottom: var(--rule); margin-bottom: clamp(12px, 2vw, 24px);
+      min-width: 0;
+    }
+    .logo { font-size: clamp(20px, 4.5vw, 30px); font-weight: 900; letter-spacing: -0.04em; text-transform: uppercase; line-height: 1; }
+    .logo-sub { font-size: 11px; font-weight: 700; letter-spacing: 0.2em; text-transform: uppercase; color: var(--gray-4); padding-bottom: 2px; flex-shrink: 0; }
+
+    /* ── Banner ── */
+    .banner { display: none; padding: 8px var(--pad); border: var(--rule); margin-bottom: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; background: var(--black); color: var(--white); word-break: break-word; }
+    .banner.visible { display: block; }
+
+    /* ── Toasts / overlay ── */
+    #downloadToast { position: fixed; bottom: 18px; right: 18px; padding: 8px 14px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; background: #c00; color: var(--white); border: var(--rule); opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 999; }
+    #downloadToast.visible { opacity: 1; }
+    #errorToast { position: fixed; right: 16px; bottom: 16px; background: #c80000; color: #fff; border: 2px solid #800; padding: 10px 14px; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; border-radius: 2px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 9999; display: none; }
+    #errorToast.visible { display: block; }
+    #syncOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.82); display: none; align-items: center; justify-content: center; z-index: 10000; padding: 16px; }
+    #syncOverlay.visible { display: flex; }
+    #syncOverlay .sync-card { background: var(--white); border: 2px solid var(--black); padding: 20px 24px; min-width: 0; max-width: 360px; width: 100%; box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+    #syncOverlay .sync-title { font-size: 12px; font-weight: 900; letter-spacing: 0.18em; text-transform: uppercase; margin-bottom: 8px; }
+    #syncOverlay .sync-msg { font-size: 11px; color: var(--gray-4); margin-bottom: 14px; font-family: var(--mono); }
+    #syncOverlay .sync-bar-outer { width: 100%; height: 12px; border: 1px solid var(--black); background: var(--gray-1); }
+    #syncOverlay .sync-bar-inner { height: 100%; background: var(--black); width: 0%; transition: width 0.15s; }
+    #syncOverlay .sync-count { font-size: 10px; color: var(--gray-3); margin-top: 6px; font-family: var(--mono); text-align: right; }
+
+    /* ── Control strips ── */
+    .strip {
+      display: flex; flex-wrap: wrap; align-items: stretch;
+      border: var(--rule); margin-bottom: 6px; min-width: 0;
+    }
+    .group {
+      display: flex; align-items: center; gap: 0;
+      padding: 0 var(--pad);
+      border-bottom: var(--rule-sm);
+      min-width: 0; flex: 1 1 100%;
+    }
+    .group:last-child { border-bottom: none; }
+    .group--grow { flex: 1 1 100%; }
+    .group-inner {
+      display: flex; align-items: center; gap: 6px;
+      padding: 5px 0; flex-wrap: wrap; min-width: 0;
+      flex: 1;
+    }
+    .lbl {
+      font-size: 8px; font-weight: 900; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--gray-4); white-space: nowrap;
+      padding-right: 8px; border-right: var(--rule-sm); margin-right: 8px;
+      align-self: stretch; display: flex; align-items: center;
+      flex-shrink: 0;
+    }
+
+    @media (min-width: 640px) {
+      .group {
+        flex: 0 1 auto; border-bottom: none;
+        border-right: var(--rule-sm);
+      }
+      .group:last-child { border-right: none; }
+      .group--grow { flex: 1 1 220px; min-width: min(100%, 220px); }
+    }
+
+    /* ── Inputs ── */
+    input[type="number"], select {
+      height: 30px; padding: 0 8px; background: var(--white);
+      border: var(--rule-sm); color: var(--black); font-family: var(--font);
+      font-size: 13px; font-weight: 600; outline: none; border-radius: 0;
+      appearance: none; transition: background 0.08s;
+    }
+    input[type="number"]:focus, select:focus { background: var(--black); color: var(--white); }
+    input[type="number"] { width: 54px; text-align: center; }
+    select { min-width: 120px; width: 100%; max-width: 100%; cursor: pointer; padding-right: 8px; }
+    input[type="file"] { display: none; }
+
+    /* ── Buttons ── */
+    .btn {
+      height: 28px; padding: 0 10px; background: var(--white);
+      border: var(--rule-sm); color: var(--black); font-family: var(--font);
+      font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+      text-transform: uppercase; cursor: pointer; white-space: nowrap;
+      border-radius: 0; transition: background 0.08s, color 0.08s;
+    }
+    .btn:hover:not(:disabled) { background: var(--black); color: var(--white); }
+    .btn:disabled { opacity: 0.25; cursor: default; }
+    .btn-primary { background: var(--black); color: var(--white); border-color: var(--black); font-weight: 900; }
+    .btn-primary:hover:not(:disabled) { background: var(--gray-4); border-color: var(--gray-4); }
+    .btn-ghost {
+      height: 28px; padding: 0 10px; background: var(--white);
+      border: var(--rule-sm); color: var(--black); font-family: var(--font);
+      font-size: 9px; font-weight: 900; letter-spacing: 0.18em;
+      text-transform: uppercase; cursor: pointer; border-radius: 0;
+      transition: background 0.08s, color 0.08s;
+    }
+    .btn-ghost:hover { background: var(--black); color: var(--white); }
+    .btn-ghost.is-connected { background: var(--black); color: var(--white); }
+    .len-adj-btn {
+      width: 26px; height: 30px; padding: 0; border: var(--rule-sm);
+      background: var(--white); color: var(--black); font-size: 14px; font-weight: 700;
+      cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .len-adj-btn:hover { background: var(--gray-1); }
+    .len-adj-btn:active { background: var(--black); color: var(--white); }
+    .scale-btn {
+      height: 30px; padding: 0 10px; background: var(--white);
+      border: var(--rule-sm); color: var(--black); font-family: var(--font);
+      font-size: 9px; font-weight: 900; letter-spacing: 0.12em;
+      text-transform: uppercase; cursor: pointer; border-radius: 0;
+      transition: background 0.08s, color 0.08s;
+    }
+    .scale-btn:hover { background: var(--gray-2); }
+    .scale-btn.btn-primary { background: var(--black); color: var(--white); border-color: var(--black); }
+
+    /* ── MIDI status ── */
+    #midiStatus { font-size: 11px; font-weight: 600; color: var(--gray-3); letter-spacing: 0.02em; padding-left: 8px; }
+    #midiStatus.is-ok { color: var(--black); }
+    #midiStatus.is-warn { color: var(--gray-4); }
+
+    /* ── Group tabs + pattern pills (one bar) ── */
+    .bank-group-bar {
+      display: grid;
+      grid-template-columns: 1fr;
+      border: var(--rule); margin-bottom: 6px;
+      min-width: 0; max-width: 100%;
+    }
+    .bank-group-bar .group-tabs {
+      display: flex; flex-direction: row; flex-shrink: 0;
+      margin: 0;
+      border-bottom: var(--rule-sm);
+    }
+    .bank-group-bar .group-tab {
+      flex: 1 1 0; min-width: 0; min-height: 36px; padding: 0 6px;
+      display: flex; align-items: center; justify-content: center; cursor: pointer;
+      font-size: 9px; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase;
+      border-right: var(--rule-sm); background: var(--white); color: var(--gray-4);
+      transition: all 0.08s; user-select: none;
+    }
+    .bank-group-bar .group-tab:last-child { border-right: none; }
+    .bank-group-bar .group-tab:hover:not(.is-active) { background: var(--gray-1); color: var(--black); }
+    .bank-group-bar .group-tab.is-active { background: var(--black); color: var(--white); }
+
+    .pat-pills { display: flex; gap: 0; flex: 1; min-width: 0; }
+    .pat-pill {
+      flex: 1 1 0; min-width: 0; height: 36px;
+      border: var(--rule-sm); margin-right: -1px;
+      background: var(--white); color: var(--gray-3); font-family: var(--mono);
+      font-size: 10px; font-weight: 700; cursor: pointer; display: flex;
+      align-items: center; justify-content: center; transition: all 0.08s;
+      border-radius: 0; position: relative; user-select: none;
+    }
+    .pat-pill:hover:not(.is-active) { background: var(--gray-1); color: var(--black); }
+    .pat-pill.is-active { background: var(--black); border-color: var(--black); color: var(--white); z-index: 1; }
+    .pat-pill.is-dirty:not(.is-active) { box-shadow: inset 0 -2px 0 0 var(--black); color: var(--black); }
+    .pat-pill.is-playing { animation: pill-blink 0.5s steps(1) infinite; }
+    .pat-pill.is-playing.is-active { animation: pill-blink-inv 0.5s steps(1) infinite; }
+    .pat-pill.is-copied { box-shadow: inset 0 0 0 2px var(--red); color: var(--black); font-weight: 900; }
+    .pat-pill.is-copied.is-active { box-shadow: inset 0 0 0 2px var(--red); }
+    .pat-pill.is-queued:not(.is-active) { outline: 2px dashed var(--black); outline-offset: -2px; color: var(--black); }
+    .pat-pill.is-chained:not(.is-playing):not(.is-active) { background: var(--gray-2); outline: 2px solid var(--black); outline-offset: -2px; color: var(--black); font-weight: 700; }
+    .pat-pill.is-drag-chain:not(.is-chained) { background: var(--gray-1); outline: 2px dotted var(--black); outline-offset: -2px; color: var(--black); opacity: 0.75; }
+    @keyframes pill-blink     { 0%,100%{background:var(--white)} 50%{background:var(--gray-2)} }
+    @keyframes pill-blink-inv { 0%,100%{background:var(--black)} 50%{background:var(--gray-4)} }
+    .pat-pill-badge {
+      position: absolute; bottom: 1px; right: 2px;
+      font-size: 6px; font-weight: 900; line-height: 1;
+      opacity: 0.55; pointer-events: none;
+    }
+    .pat-pill.is-active .pat-pill-badge { opacity: 0.7; }
+
+    /* Follow-hardware toggle */
+    .follow-btn {
+      padding: 0 var(--pad); min-height: 32px;
+      display: flex; align-items: center; justify-content: center;
+      border: none; border-top: var(--rule-sm);
+      background: var(--white); color: var(--gray-4);
+      font-family: var(--font); font-size: 9px; font-weight: 900;
+      letter-spacing: 0.14em; text-transform: uppercase;
+      cursor: pointer; user-select: none; white-space: nowrap;
+      transition: background 0.08s, color 0.08s;
+    }
+    .follow-btn:hover:not(.is-on) { background: var(--gray-1); color: var(--black); }
+    .follow-btn.is-on { background: var(--black); color: var(--white); }
+
+    @media (min-width: 640px) {
+      .bank-group-bar {
+        display: flex; align-items: stretch; flex-wrap: nowrap;
+        overflow-x: auto; -webkit-overflow-scrolling: touch;
+      }
+      .bank-group-bar .group-tabs { border-bottom: none; border-right: var(--rule); flex-shrink: 0; }
+      .bank-group-bar .group-tab { flex: 0 0 auto; min-width: 64px; padding: 0 10px; }
+      .pat-pill { flex: 1 1 0; }
+      .follow-btn {
+        margin-left: auto;
+        border-top: none; border-left: var(--rule-sm);
+        flex: 0 0 auto; padding: 0 14px;
+      }
+    }
+
+    /* Edits / Clipboard action bar */
+    .strip--action-bar {
+      display: grid; grid-template-columns: 1fr;
+      gap: 0; align-items: stretch;
+    }
+    .strip--action-bar .group {
+      flex-direction: column; align-items: stretch; align-self: stretch;
+      gap: 0; padding: 6px var(--pad) 8px;
+      border-right: none; border-bottom: var(--rule);
+      flex: initial; min-width: 0;
+    }
+    .strip--action-bar .group:last-child { border-bottom: none; }
+    .strip--action-bar .group .lbl {
+      border-right: none; margin-right: 0;
+      padding: 0 0 5px 0; margin-bottom: 6px;
+      border-bottom: var(--rule-sm); align-self: stretch;
+      justify-content: flex-start; letter-spacing: 0.2em;
+    }
+    .strip--action-bar .group-inner { padding: 0; align-items: flex-start; }
+    @media (min-width: 760px) {
+      .strip--action-bar { grid-template-columns: minmax(220px, 1.2fr) minmax(200px, 1fr) minmax(200px, 1fr); }
+      .strip--action-bar .group { border-bottom: none; border-right: var(--rule); }
+      .strip--action-bar .group:last-child { border-right: none; }
+    }
+    #copyStatus { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; color: var(--red); padding-left: 8px; white-space: nowrap; }
+
+    /* ── Sequencer panel ── */
+    .seq-panel { border: var(--rule); margin-bottom: 6px; min-width: 0; max-width: 100%; }
+    .seq-toolbar {
+      display: flex; align-items: center; justify-content: flex-start;
+      padding: 8px var(--pad); border-bottom: var(--rule);
+      flex-wrap: wrap; gap: 8px 12px; min-width: 0;
+    }
+    .seq-toolbar-lbl { font-size: 9px; font-weight: 900; letter-spacing: 0.18em; text-transform: uppercase; color: var(--gray-4); }
+    .seq-toolbar-steps { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-width: 0; flex-wrap: wrap; }
+    .seq-pat-len { width: 36px; text-align: center; flex-shrink: 0; }
+    .seq-hint {
+      font-size: 10px; font-weight: 500; color: var(--gray-3); letter-spacing: 0.02em;
+      flex: 1 1 100%; min-width: 0; max-width: 100%;
+    }
+    .seq-hint b { color: var(--black); font-weight: 700; }
+    @media (min-width: 960px) {
+      .seq-hint { flex: 1 1 260px; }
+    }
+    .seq-grid-wrap { padding: 8px; overflow-x: auto; overflow-y: visible; -webkit-overflow-scrolling: touch; min-width: 0; max-width: 100%; }
+
+    /* ── Drum grid ──
+       17 columns: row label + 16 step cells. Row 0 = step-number header.
+       Beat columns (steps 1, 5, 9, 13) get a heavy left rule, mirroring the
+       4-step groups silk-screened on the 606 panel. */
+    .drum-grid {
+      display: grid; width: 100%; min-width: 560px; box-sizing: border-box;
+      grid-template-columns: minmax(150px, 190px) repeat(16, minmax(25px, 1fr));
+      gap: 0; border-top: var(--rule-sm); border-left: var(--rule-sm);
+    }
+    .dg-corner {
+      border-right: var(--rule); border-bottom: var(--rule);
+      background: var(--gray-1); display: flex; align-items: center; padding: 0 6px;
+      font-size: 8px; font-weight: 900; letter-spacing: 0.14em; text-transform: uppercase; color: var(--gray-4);
+    }
+    .dg-head {
+      border-right: var(--rule-sm); border-bottom: var(--rule);
+      background: var(--gray-1); text-align: center; padding: 4px 0 3px;
+      font-family: var(--mono); font-size: 9px; font-weight: 700; letter-spacing: 0.06em; color: var(--gray-4);
+      position: relative; user-select: none;
+    }
+    .dg-head.is-beat { border-left: var(--rule); margin-left: -1px; }
+    .dg-head.is-beyond { color: var(--gray-2); }
+    .dg-head .dg-play-dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--red);
+      margin: 3px auto 0; opacity: 0;
+    }
+    .dg-head.is-playing { background: var(--black); color: var(--white); }
+    .dg-head.is-playing .dg-play-dot { opacity: 1; }
+
+    .dg-rowlbl {
+      display: flex; align-items: center; gap: 6px; min-width: 0;
+      border-right: var(--rule); border-bottom: var(--rule-sm);
+      padding: 3px 6px; user-select: none;
+    }
+    .dg-rowlbl.dg-row-ac { border-bottom: var(--rule); }
+    .dg-abbr { font-size: 12px; font-weight: 900; letter-spacing: -0.02em; width: 24px; flex-shrink: 0; }
+    .dg-rowlbl.dg-row-ac .dg-abbr { color: var(--red); }
+    .dg-name { font-size: 8px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gray-4); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dg-rowtools { display: flex; gap: 0; flex-shrink: 0; }
+    .dg-tool {
+      width: 20px; height: 20px; border: var(--rule-sm); margin-right: -1px;
+      background: var(--white); color: var(--gray-3); font-size: 9px; font-weight: 900;
+      cursor: pointer; font-family: var(--font); border-radius: 0; padding: 0;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.08s;
+    }
+    .dg-tool:last-child { margin-right: 0; }
+    .dg-tool:hover { background: var(--black); color: var(--white); }
+
+    .dg-cell {
+      height: 36px; min-width: 0;
+      border-right: var(--rule-sm); border-bottom: var(--rule-sm);
+      background: var(--white); cursor: pointer; position: relative;
+      transition: background 0.05s;
+      touch-action: none;
+    }
+    .dg-cell.dg-row-ac { border-bottom: var(--rule); }
+    .dg-cell.is-beat { border-left: var(--rule); margin-left: -1px; }
+    .dg-cell:hover { background: var(--gray-1); }
+    .dg-cell.is-on { background: var(--black); }
+    .dg-cell.is-on:hover { background: #222; }
+    .dg-cell.dg-row-ac.is-on { background: var(--red); }
+    .dg-cell.dg-row-ac.is-on:hover { background: #a50000; }
+    .dg-cell.is-beyond { background: var(--gray-1); cursor: default; opacity: 0.45; }
+    .dg-cell.is-playing-col:not(.is-on) { background: rgba(204, 0, 0, 0.07); }
+
+    /* ── Collapsible panels (tracks / log) ── */
+    .panel { border: var(--rule); margin-bottom: 6px; min-width: 0; max-width: 100%; }
+    .panel-bar { display: flex; align-items: center; gap: 10px; padding: 10px var(--pad); cursor: pointer; user-select: none; border-bottom: 1px solid transparent; transition: background 0.08s; }
+    .panel-bar:hover { background: var(--gray-1); }
+    .panel-bar.is-open { border-bottom: var(--rule-sm); }
+    .panel-bar-label { font-size: 9px; font-weight: 900; letter-spacing: 0.18em; text-transform: uppercase; color: var(--gray-4); }
+    .panel-bar-arrow { font-size: 8px; color: var(--gray-3); display: inline-block; transition: transform 0.12s; }
+    .panel-bar.is-open .panel-bar-arrow { transform: rotate(90deg); }
+    .panel-bar-info { margin-left: auto; font-size: 10px; font-weight: 700; color: var(--gray-3); letter-spacing: 0.04em; font-family: var(--mono); }
+    .panel-body { display: none; }
+    .panel-body.is-open { display: block; }
+    .panel-inner { padding: var(--pad); display: flex; flex-direction: column; gap: 10px; }
+
+    /* ── Track editor ── */
+    .trk-tabs { display: flex; gap: 0; flex-wrap: wrap; }
+    .trk-tab {
+      flex: 1 1 0; min-width: 44px; height: 32px;
+      border: var(--rule-sm); margin-right: -1px;
+      background: var(--white); color: var(--gray-3); font-family: var(--mono);
+      font-size: 10px; font-weight: 700; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 0; transition: all 0.08s; user-select: none; position: relative;
+    }
+    .trk-tab:hover:not(.is-active) { background: var(--gray-1); color: var(--black); }
+    .trk-tab.is-active { background: var(--black); border-color: var(--black); color: var(--white); z-index: 1; }
+    .trk-chain { display: flex; flex-wrap: wrap; gap: 4px; border: var(--rule-sm); padding: 8px; min-height: 44px; }
+    .trk-slot {
+      display: flex; align-items: center; gap: 4px;
+      border: var(--rule-sm); padding: 3px 4px 3px 8px;
+      font-family: var(--mono); font-size: 11px; font-weight: 700;
+    }
+    .trk-slot-x {
+      width: 16px; height: 16px; border: var(--rule-sm);
+      background: var(--white); color: var(--gray-3); font-size: 9px; font-weight: 900;
+      cursor: pointer; border-radius: 0; padding: 0; line-height: 1;
+    }
+    .trk-slot-x:hover { background: var(--red); border-color: var(--red); color: var(--white); }
+    .trk-empty { font-size: 10px; color: var(--gray-3); align-self: center; padding: 4px; }
+    .trk-toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .trk-count { font-size: 10px; font-weight: 700; color: var(--gray-3); font-family: var(--mono); margin-left: auto; }
+
+    /* ── Library ── */
+    .lib-toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .lib-list { display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow-y: auto; border: var(--rule-sm); padding: 6px; }
+    .lib-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-bottom: 1px solid var(--gray-1); }
+    .lib-item:last-child { border-bottom: none; }
+    .lib-item-label { flex: 1; font-size: 11px; font-family: var(--mono); color: var(--black); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .lib-empty { padding: 8px; font-size: 10px; color: var(--gray-3); text-align: center; }
+
+    /* ── Log ── */
+    #log { font-family: var(--mono); font-size: 11px; font-weight: 500; background: var(--gray-1); padding: 12px var(--pad); min-height: 100px; height: clamp(100px, 20vh, 200px); max-height: 50vh; overflow: auto; white-space: pre-wrap; color: var(--gray-4); line-height: 1.9; letter-spacing: 0.02em; }
+    .log-note { color: var(--black); font-weight: 700; }
+    .log-syx  { color: var(--black); }
+    .log-err  { color: var(--red); font-weight: 700; }
+    .log-ack  { color: var(--gray-4); }
+    .log-edit { color: var(--blue, #06f); }
+
+    /* ── Footer ── */
+    .footer {
+      margin-top: clamp(16px, 3vw, 32px); padding-top: 10px;
+      border-top: var(--rule);
+      display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--gray-4);
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <header class="header">
+    <div class="logo">SuperOS&#x2011;606</div>
+    <div class="logo-sub">Pattern Editor</div>
+  </header>
+
+  <div id="downloadToast"></div>
+  <div id="errorToast"></div>
+
+  <div id="syncOverlay">
+    <div class="sync-card">
+      <div class="sync-title" id="syncTitle">Syncing with 606</div>
+      <div class="sync-msg" id="syncMsg">Reading patterns and tracks...</div>
+      <div class="sync-bar-outer"><div class="sync-bar-inner" id="syncBar"></div></div>
+      <div class="sync-count" id="syncCount">0 / 40</div>
+    </div>
+  </div>
+
+  <div class="banner" id="httpBanner">
+    &#9632;&nbsp; Serve over HTTP for Web MIDI — run: python3 -m http.server 8080 --directory tools/web-pattern-edit
+  </div>
+
+  <!-- MIDI Connection -->
+  <div class="strip">
+    <div class="group">
+      <div class="group-inner">
+        <button class="btn-ghost" id="btnMidi">Connect MIDI</button>
+        <span id="midiStatus">Not connected</span>
+      </div>
+    </div>
+    <div class="group">
+      <span class="lbl">Out &#8594; 606</span>
+      <div class="group-inner"><select id="selOut" disabled></select></div>
+    </div>
+    <div class="group">
+      <span class="lbl">606 &#8594; In</span>
+      <div class="group-inner"><select id="selIn" disabled></select></div>
+    </div>
+  </div>
+
+  <!-- Device transfer + JSON -->
+  <div class="strip">
+    <div class="group">
+      <span class="lbl">From 606</span>
+      <div class="group-inner" style="gap:6px;flex-wrap:wrap">
+        <button class="btn" id="btnReq" disabled>&#8595; Pattern</button>
+        <button class="btn" id="btnReqAll" disabled>&#8595; Everything</button>
+      </div>
+    </div>
+    <div class="group">
+      <span class="lbl">To 606</span>
+      <div class="group-inner" style="gap:6px;flex-wrap:wrap">
+        <button class="btn" id="btnSendPat" disabled>&#8593; Pattern</button>
+        <button class="btn" id="btnSendGroup" disabled>&#8593; Group</button>
+        <button class="btn" id="btnSendAll" disabled>&#8593; Everything</button>
+      </div>
+    </div>
+    <div class="group">
+      <span class="lbl">Save JSON</span>
+      <div class="group-inner" style="gap:6px;flex-wrap:wrap">
+        <button class="btn" id="btnSavePattern">Pattern</button>
+        <button class="btn" id="btnSaveGroup">Group</button>
+        <button class="btn" id="btnSaveAll">All + Tracks</button>
+      </div>
+    </div>
+    <div class="group">
+      <span class="lbl">Load JSON</span>
+      <div class="group-inner" style="gap:6px">
+        <button class="btn" id="btnLoadJson">&#8593; Upload JSON</button>
+        <input type="file" id="fileInput" accept=".json,application/json" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Pattern group tabs + pattern pills -->
+  <div class="bank-group-bar">
+    <div class="group-tabs" id="groupTabs"></div>
+    <div class="pat-pills" id="patPills"></div>
+    <button class="follow-btn" id="btnEditLive" title="Edit patterns without changing what the 606 plays or selects — when off, the editor and the 606 stay in sync">Edit Live</button>
+  </div>
+
+  <!-- Edits / Clipboard / Tools -->
+  <div class="strip strip--action-bar">
+    <div class="group">
+      <span class="lbl">Edits</span>
+      <div class="group-inner" style="gap:6px;flex-wrap:wrap">
+        <button class="btn" id="btnUndo" disabled>&#8592; Undo</button>
+        <button class="btn" id="btnRedo" disabled>Redo &#8594;</button>
+        <button class="btn" id="btnClearPat">Clear Pattern</button>
+      </div>
+    </div>
+    <div class="group">
+      <span class="lbl">Clipboard</span>
+      <div class="group-inner" style="gap:6px;flex-wrap:wrap">
+        <button class="btn" id="btnCopy">Copy</button>
+        <button class="btn" id="btnPaste" disabled>Paste</button>
+        <span id="copyStatus"></span>
+      </div>
+    </div>
+    <div class="group">
+      <span class="lbl">Tools</span>
+      <div class="group-inner" style="gap:6px;flex-wrap:wrap">
+        <button class="btn" id="btnNudgeL" title="Rotate all rows one step earlier">&#8592; Nudge</button>
+        <button class="btn" id="btnNudgeR" title="Rotate all rows one step later">Nudge &#8594;</button>
+        <button class="btn" id="btnRandAll" title="Random pattern (musical densities per voice)">Randomize</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sequencer grid -->
+  <div class="seq-panel">
+    <div class="seq-toolbar">
+      <div class="seq-toolbar-steps">
+        <span class="seq-toolbar-lbl">Steps</span>
+        <button class="len-adj-btn" id="patLenDec" title="Fewer steps">&#8722;</button>
+        <input type="number" id="patLen" class="seq-pat-len" min="1" max="16" value="16" />
+        <button class="len-adj-btn" id="patLenInc" title="More steps">+</button>
+      </div>
+      <div class="seq-toolbar-steps" style="align-items:center;gap:4px">
+        <span class="seq-toolbar-lbl" style="margin-right:4px">Scale</span>
+        <button class="scale-btn" data-scale="0" title="Scale 1: 16th notes (6 clock ticks per step)">1 &middot; 16th</button>
+        <button class="scale-btn" data-scale="1" title="Scale 2: 32nd notes (3 clock ticks per step)">2 &middot; 32nd</button>
+        <button class="scale-btn" data-scale="2" title="Scale 3: 8th-note triplets (8 clock ticks per step)">3 &middot; 8 Trip</button>
+        <button class="scale-btn" data-scale="3" title="Scale 4: 16th-note triplets (4 clock ticks per step)">4 &middot; 16 Trip</button>
+      </div>
+      <span class="seq-hint">
+        click / drag paints steps &nbsp;&mdash;&nbsp; <b>AC</b> = global accent for the whole step
+        &nbsp;&middot;&nbsp; row tools: <b>&#8592;</b> <b>&#8594;</b> rotate &nbsp;<b>R</b> random &nbsp;<b>&#10005;</b> clear
+        &nbsp;&mdash;&nbsp; drag across pattern pills = chain &nbsp;&mdash;&nbsp; red dot = playing step
+      </span>
+    </div>
+    <div class="seq-grid-wrap">
+      <div class="drum-grid" id="drumGrid"></div>
+    </div>
+  </div>
+
+  <!-- Tracks -->
+  <div class="panel">
+    <div class="panel-bar" id="trkBar">
+      <span class="panel-bar-arrow">&#9658;</span>
+      <span class="panel-bar-label">Tracks</span>
+      <span class="panel-bar-info" id="trkInfo"></span>
+    </div>
+    <div class="panel-body" id="trkBody">
+      <div class="panel-inner">
+        <div class="trk-tabs" id="trkTabs"></div>
+        <div class="trk-chain" id="trkChain"></div>
+        <div class="trk-toolbar">
+          <button class="btn btn-primary" id="btnTrkAdd" title="Append the pattern currently shown in the grid">+ Add Current Pattern</button>
+          <button class="btn" id="btnTrkRemove">Remove Last</button>
+          <button class="btn" id="btnTrkClear">Clear Track</button>
+          <button class="btn" id="btnTrkSend" disabled>&#8593; Send Track</button>
+          <button class="btn" id="btnTrkReq" disabled>&#8595; Request Track</button>
+          <span class="trk-count" id="trkCount">0 / 64</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Library -->
+  <div class="panel">
+    <div class="panel-bar" id="libBar">
+      <span class="panel-bar-arrow">&#9658;</span>
+      <span class="panel-bar-label">Library</span>
+      <span class="panel-bar-info" id="libCount"></span>
+    </div>
+    <div class="panel-body" id="libBody">
+      <div class="panel-inner">
+        <div class="lib-toolbar">
+          <button class="btn btn-primary" id="btnLibAdd" title="Save the pattern currently in the grid into the library">+ Add Current Pattern</button>
+          <button class="btn" id="btnLibUpload">Upload JSON(s)</button>
+          <input type="file" id="libFileInput" accept=".json,application/json" multiple />
+          <button class="btn" id="btnLibClear">Clear Library</button>
+        </div>
+        <div class="lib-list" id="libList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="panel">
+    <div class="panel-bar" id="logBar">
+      <span class="panel-bar-arrow">&#9658;</span>
+      <span class="panel-bar-label">MIDI Log</span>
+      <span class="panel-bar-info" id="logCount"></span>
+    </div>
+    <div class="panel-body" id="logBody">
+      <div id="log"></div>
+    </div>
+  </div>
+
+</div>
+<script>
+(function () {
+  'use strict';
+
+  // ── Constants ──────────────────────────────────────────────────────
+  // Pattern blob layout (matches the firmware's serialize_pattern, 18 bytes):
+  //   bytes  0..15  steps[8]   one uint16 little-endian step bitmap per
+  //                            instrument; bit n = step n+1 on. Row order is
+  //                            the INSTRUMENT-dial order: index 0 = the global
+  //                            ACCENT track, 1..7 = BD SD LT HT CY OH CH.
+  //   byte  16      length     1..16
+  //   byte  17      scale      0..3 (SCALE switch 1..4)
+  //
+  // 32 patterns total: group I = 0..15, group II = 16..31 (absolute index =
+  // group * 16 + pattern). A track is an ordered chain of up to 64 absolute
+  // pattern indices, played end to end (8 tracks, INSTRUMENT dial 1-8).
+  var PATTERN_BYTES   = 18;
+  var MAX_STEPS       = 16;
+  var NUM_INSTRUMENTS = 8;
+  var NUM_GROUPS      = 2;     // pattern group I / II
+  var PATS_PER_GROUP  = 16;
+  var NUM_PATTERNS    = 32;
+  var NUM_TRACKS      = 8;
+  var TRACK_MAX_PATS  = 64;
+  var TRACK_BYTES     = 65;    // len + 64 pattern indices
+  var LEN_OFF         = 16;
+  var SCALE_OFF       = 17;
+  var PACKED_PATTERN  = 21;    // pack7(18 bytes) -> 2 full chunks + 1 partial
+  var PACKED_TRACK    = 75;    // pack7(65 bytes) -> 9 full chunks + 1 partial
+
+  // INSTRUMENT-dial order; MIDI notes match the firmware's INSTRUMENT_NOTE map.
+  var INSTRUMENTS = [
+    { id: 'AC', name: 'Accent',     note: 0  },
+    { id: 'BD', name: 'Bass Drum',  note: 36 },
+    { id: 'SD', name: 'Snare Drum', note: 38 },
+    { id: 'LT', name: 'Low Tom',    note: 45 },
+    { id: 'HT', name: 'High Tom',   note: 50 },
+    { id: 'CY', name: 'Cymbal',     note: 49 },
+    { id: 'OH', name: 'Open Hat',   note: 46 },
+    { id: 'CH', name: 'Closed Hat', note: 42 }
+  ];
+
+  // SCALE switch -> 24 PPQN tempo-clock ticks per step (same table as firmware).
+  var SCALE_TICKS = [6, 3, 8, 4];
+  var SCALE_LABELS = ['1 (16th notes)', '2 (32nd notes)', '3 (8th triplets)', '4 (16th triplets)'];
+
+  // Voice densities for Randomize, tuned for usable 606 grooves.
+  var RANDOM_DENSITY = [0.25, 0.30, 0.25, 0.18, 0.18, 0.12, 0.30, 0.55];
+
+  // ── SysEx protocol ─────────────────────────────────────────────────
+  // Envelope F0 7D <cmd> ... F7 — same manufacturer id as the 606's bootloader
+  // (which owns commands 0x01/0x02; the app owns 0x10+). Patterns/tracks travel
+  // 7-bit packed with an XOR checksum of the
+  // raw bytes sent as two 7-bit values (lo7, hi-bit).
+  //
+  //   editor -> 606
+  //     F0 7D 10 <pat 0-31> F7                                request pattern
+  //     F0 7D 12 <pat> <xor_lo> <xor_hi> <21B packed> F7      push pattern
+  //     F0 7D 1A <n 1-16> <p0..pn-1> F7                       select range chain
+  //     F0 7D 1D <pat 0-31> F7                                select pattern
+  //     F0 7D 24 <trk 0-7> F7                                 request track
+  //     F0 7D 26 <trk> <xor_lo> <xor_hi> <75B packed> F7      push track
+  //   606 -> editor
+  //     F0 7D 11 <pat> <xor_lo> <xor_hi> <21B packed> F7      pattern dump
+  //     F0 7D 14 <status> F7                                  push ack
+  //     F0 7D 15 <pat 0-31> F7                                pattern-start anchor (running)
+  //     F0 7D 1E <pat 0-31> F7                                selected pattern (stopped / on stop)
+  //     F0 7D 25 <trk> <xor_lo> <xor_hi> <75B packed> F7      track dump
+  //
+  // Selections behave like panel presses: immediate when the 606 is stopped,
+  // queued at the next pattern wrap when running. Note Ons matching the drum
+  // map fire that voice on the 606 (one-shot trigger; vel >= 100 = accent).
+  var SYX_MFR           = 0x7d;
+  var CMD_REQ_PATTERN   = 0x10;
+  var CMD_PATTERN_DUMP  = 0x11;
+  var CMD_PUSH_PATTERN  = 0x12;
+  var CMD_ACK           = 0x14;
+  var CMD_STEP_POS      = 0x15;
+  var CMD_STEP_UPDATE   = 0x16;   // panel step edit (606 -> editor)
+  var CMD_LENGTH_UPDATE = 0x18;   // panel length set (606 -> editor)
+  var CMD_SCALE_UPDATE  = 0x19;   // panel scale set (606 -> editor)
+  var CMD_SELECT_CHAIN  = 0x1a;
+  var CMD_SELECT_PAT    = 0x1d;
+  var CMD_ACTIVE_PAT    = 0x1e;
+  var CMD_REQ_TRACK     = 0x24;
+  var CMD_TRACK_DUMP    = 0x25;
+  var CMD_PUSH_TRACK    = 0x26;
+  var ACK_NAMES = ['ok', 'bad_checksum', 'bad_index', 'bad_length'];
+
+  var LS_KEY       = 'superos606_data_v1';
+  var LS_EDIT_LIVE = 'superos606_edit_live';
+  var LS_LIB       = 'superos606_library_v1';
+
+  if (location.protocol === 'file:')
+    document.getElementById('httpBanner').classList.add('visible');
+
+  // ── Logging ────────────────────────────────────────────────────────
+  var logEntries = 0;
+  function log(msg, cls) {
+    var el = document.getElementById('log');
+    var sp = document.createElement('span');
+    sp.className = cls || '';
+    sp.textContent = msg + '\n';
+    el.appendChild(sp);
+    el.scrollTop = el.scrollHeight;
+    logEntries++;
+    document.getElementById('logCount').textContent = logEntries;
+  }
+
+  function bindPanelToggle(barId, bodyId) {
+    var bar = document.getElementById(barId), body = document.getElementById(bodyId);
+    bar.addEventListener('click', function() {
+      var open = body.classList.toggle('is-open');
+      bar.classList.toggle('is-open', open);
+    });
+  }
+  bindPanelToggle('logBar', 'logBody');
+  bindPanelToggle('trkBar', 'trkBody');
+  bindPanelToggle('libBar', 'libBody');
+
+  // ── Pattern blob helpers ───────────────────────────────────────────
+  function makeBlankPat() {
+    var b = new Uint8Array(PATTERN_BYTES);
+    b[LEN_OFF] = MAX_STEPS;
+    b[SCALE_OFF] = 0;
+    return b;
+  }
+  function rowMask(blob, inst) {
+    return blob[2 * inst] | (blob[2 * inst + 1] << 8);
+  }
+  function setRowMask(blob, inst, mask) {
+    blob[2 * inst]     = mask & 0xff;
+    blob[2 * inst + 1] = (mask >> 8) & 0xff;
+  }
+  function stepOn(blob, inst, s) {
+    return (rowMask(blob, inst) >> s) & 1;
+  }
+  function setStep(blob, inst, s, on) {
+    var m = rowMask(blob, inst);
+    setRowMask(blob, inst, on ? (m | (1 << s)) : (m & ~(1 << s)));
+  }
+  function getLength(blob) {
+    var l = blob[LEN_OFF] | 0;
+    return Math.min(MAX_STEPS, Math.max(1, l));
+  }
+  function setLength(blob, len) {
+    blob[LEN_OFF] = Math.min(MAX_STEPS, Math.max(1, len | 0));
+  }
+  function getScale(blob)    { return Math.min(3, blob[SCALE_OFF] | 0); }
+  function setScale(blob, v) { blob[SCALE_OFF] = v & 3; }
+  function patternEmpty(blob) {
+    for (var i = 0; i < NUM_INSTRUMENTS; i++) if (rowMask(blob, i)) return false;
+    return true;
+  }
+  /** Rotate one instrument row by +1/-1 step within the pattern length. */
+  function rotateRow(blob, inst, dir) {
+    var len = getLength(blob);
+    var m = rowMask(blob, inst), out = 0;
+    for (var s = 0; s < len; s++) {
+      if ((m >> s) & 1) out |= 1 << (((s + dir) % len + len) % len);
+    }
+    setRowMask(blob, inst, (m & (~0 << len)) | out);
+  }
+  function clearRow(blob, inst) { setRowMask(blob, inst, 0); }
+  function randomRow(blob, inst) {
+    var len = getLength(blob), m = 0;
+    for (var s = 0; s < len; s++)
+      if (Math.random() < RANDOM_DENSITY[inst]) m |= 1 << s;
+    setRowMask(blob, inst, m);
+  }
+  function cloneU8(u) { var x = new Uint8Array(u.length); x.set(u); return x; }
+  function blobsEqual(a, b) {
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  // ── 7-bit pack / unpack (same scheme as the bootloader) ────────────
+  function pack7(src) {
+    var out = [];
+    for (var i = 0; i < src.length; i += 7) {
+      var msb = 0, n = Math.min(7, src.length - i);
+      for (var b = 0; b < n; b++) if (src[i+b] & 0x80) msb |= 1 << b;
+      out.push(msb);
+      for (var b2 = 0; b2 < n; b2++) out.push(src[i+b2] & 0x7f);
+    }
+    return new Uint8Array(out);
+  }
+  function unpack7(inp, outLen) {
+    var out = new Uint8Array(outLen), oi = 0, ii = 0;
+    while (oi < outLen) {
+      if (ii >= inp.length) return null;
+      var msb = inp[ii++];
+      for (var b = 0; b < 7 && oi < outLen; b++) {
+        if (ii >= inp.length) return null;
+        out[oi++] = inp[ii++] | (((msb >> b) & 1) ? 0x80 : 0);
+      }
+    }
+    return out;
+  }
+  function xorBytes(u8) {
+    var x = 0;
+    for (var i = 0; i < u8.length; i++) x ^= u8[i];
+    return x & 0xff;
+  }
+
+  // ── Storage ────────────────────────────────────────────────────────
+  // groups[g][p] = Uint8Array(18); tracks[t] = { len, pat: Uint8Array(64) }.
+  var groups = [];   // [2][16]
+  var tracks = [];   // [8]
+
+  function initData() {
+    groups = [];
+    for (var g = 0; g < NUM_GROUPS; g++) {
+      groups[g] = [];
+      for (var p = 0; p < PATS_PER_GROUP; p++) groups[g][p] = makeBlankPat();
+    }
+    tracks = [];
+    for (var t = 0; t < NUM_TRACKS; t++)
+      tracks[t] = { len: 0, pat: new Uint8Array(TRACK_MAX_PATS) };
+  }
+  function saveToLS() {
+    try {
+      var ser = {
+        v: 1,
+        patterns: groups.map(function(grp) {
+          return grp.map(function(b) { return Array.from(b); });
+        }),
+        tracks: tracks.map(function(t) {
+          return { len: t.len, pat: Array.from(t.pat) };
+        })
+      };
+      localStorage.setItem(LS_KEY, JSON.stringify(ser));
+    } catch(e) { /* quota */ }
+  }
+  function loadFromLS() {
+    try {
+      var raw = localStorage.getItem(LS_KEY);
+      if (!raw) return false;
+      var ser = JSON.parse(raw);
+      if (!ser || !Array.isArray(ser.patterns) || ser.patterns.length !== NUM_GROUPS) return false;
+      for (var g = 0; g < NUM_GROUPS; g++) {
+        if (!Array.isArray(ser.patterns[g]) || ser.patterns[g].length !== PATS_PER_GROUP) return false;
+        for (var p = 0; p < PATS_PER_GROUP; p++) {
+          var arr = ser.patterns[g][p];
+          if (!Array.isArray(arr) || arr.length !== PATTERN_BYTES) return false;
+          groups[g][p] = new Uint8Array(arr);
+        }
+      }
+      if (Array.isArray(ser.tracks)) {
+        for (var t = 0; t < NUM_TRACKS && t < ser.tracks.length; t++) {
+          var st = ser.tracks[t];
+          if (!st || !Array.isArray(st.pat)) continue;
+          tracks[t].len = Math.min(TRACK_MAX_PATS, Math.max(0, st.len | 0));
+          for (var i = 0; i < TRACK_MAX_PATS; i++)
+            tracks[t].pat[i] = (st.pat[i] | 0) % NUM_PATTERNS;
+        }
+      }
+      return true;
+    } catch(e) { return false; }
+  }
+
+  initData();
+  loadFromLS();
+
+  // ── Undo / redo per pattern per group ─────────────────────────────
+  var history = [], histIdx = [], commitIdx = [];
+  function initHistory() {
+    history = []; histIdx = []; commitIdx = [];
+    for (var g = 0; g < NUM_GROUPS; g++) {
+      history[g] = []; histIdx[g] = []; commitIdx[g] = [];
+      for (var p = 0; p < PATS_PER_GROUP; p++) {
+        history[g][p] = [cloneU8(groups[g][p])];
+        histIdx[g][p] = 0;
+        commitIdx[g][p] = 0;
+      }
+    }
+  }
+  initHistory();
+
+  function pushHistory(g, p) {
+    var h = history[g][p], idx = histIdx[g][p];
+    h.splice(idx + 1);
+    h.push(cloneU8(groups[g][p]));
+    if (h.length > 50) { h.shift(); if (commitIdx[g][p] > 0) commitIdx[g][p]--; }
+    else { histIdx[g][p] = h.length - 1; }
+  }
+  function canUndo(g, p) { return histIdx[g][p] > 0; }
+  function canRedo(g, p) { return histIdx[g][p] < history[g][p].length - 1; }
+  function doUndo(g, p) {
+    if (!canUndo(g, p)) return;
+    histIdx[g][p]--;
+    groups[g][p].set(history[g][p][histIdx[g][p]]);
+  }
+  function doRedo(g, p) {
+    if (!canRedo(g, p)) return;
+    histIdx[g][p]++;
+    groups[g][p].set(history[g][p][histIdx[g][p]]);
+  }
+  function isDirty(g, p) {
+    var h = history[g][p], ci = commitIdx[g][p];
+    return !blobsEqual(groups[g][p], h[ci] || h[0]);
+  }
+
+  // ── Active state ───────────────────────────────────────────────────
+  // The group tabs only switch which group the pill bar shows (activeGroup),
+  // exactly like the PATTERN GROUP button on the panel — they never move the
+  // selection. The selected/edited pattern keeps its own group (editGroup +
+  // activePat), so flipping the view shows no solid pill in the other group
+  // unless the playing/selected pattern really lives there.
+  var activeGroup = 0;    // group the pill bar displays (0 = I, 1 = II)
+  var editGroup   = 0;    // group of the selected/edited pattern
+  var activePat   = 0;    // 0..15 within the group
+  var activeTrack = 0;    // 0..7 in the tracks panel
+  var playingAbs  = -1;   // absolute pattern index the 606 is playing (-1 = unknown)
+  var playingStep = -1;   // playhead column, clock-derived + 0x15 anchored
+  var clipboard   = null;
+  var copiedFrom  = null; // { g, p } or null
+
+  // Sync model: by default the editor mirrors the 606 — clicking a pill
+  // selects that pattern ON the hardware too, and hardware selections move
+  // the editor. "Edit Live" detaches the view so other patterns can be edited
+  // while the 606 keeps playing whatever it plays.
+  var editLive = false;
+  try {
+    editLive = localStorage.getItem(LS_EDIT_LIVE) === 'on';
+  } catch(e) { /* ignore */ }
+
+  var patChain   = [];    // active range chain mirrored on the 606 (abs indices)
+  var queuedSel  = -1;    // selection sent while running, waiting for the wrap (abs)
+  var dragChain  = [];    // pill-drag chain preview (0..15 within the group)
+  var chainDragging = false, chainDragMoved = false, chainAnchor = -1;
+
+  function activeBlob() { return groups[editGroup][activePat]; }
+  function activeAbs()  { return editGroup * PATS_PER_GROUP + activePat; }
+
+  // ── MIDI state ─────────────────────────────────────────────────────
+  var midiAccess = null, midiOut = null, midiIn = null;
+  var rxBuf = [];
+  var liveTimer = null;
+  var lastPush = null;       // { g, p } of the last single pattern pushed (for ACK commit)
+  var clkRunning = false;
+  var clkTick = -1;          // ticks since the last pattern-start anchor
+  var playTicksPerStep = 6;  // chase rate, latched at each anchor (like the firmware's scale latch)
+  var autoSyncDone = false;  // full sync ran for the current port pair
+  var pendingReq = -1, pendingReqTimer = null;   // manual-request diagnostics
+
+  // ── Build UI: group tabs + pattern pills ───────────────────────────
+  var GROUP_NAMES = ['Group I', 'Group II'];
+  var tabsEl = document.getElementById('groupTabs');
+  for (var gi = 0; gi < NUM_GROUPS; gi++) {
+    (function(g) {
+      var t = document.createElement('div');
+      t.className = 'group-tab' + (g === 0 ? ' is-active' : '');
+      t.textContent = GROUP_NAMES[g];
+      t.addEventListener('click', function() { switchGroup(g); });
+      tabsEl.appendChild(t);
+    })(gi);
+  }
+
+  var pillsEl = document.getElementById('patPills');
+  for (var pi = 0; pi < PATS_PER_GROUP; pi++) {
+    (function(p) {
+      var btn = document.createElement('button');
+      btn.className = 'pat-pill';
+      btn.dataset.pat = p;
+      btn.addEventListener('pointerdown', function(e) {
+        chainAnchor = p;
+        chainDragging = true;
+        chainDragMoved = false;
+        dragChain = [p];
+        e.preventDefault();
+      });
+      pillsEl.appendChild(btn);
+    })(pi);
+  }
+
+  // ── Pill drag-chain (like the 303): drag across pills to chain a range,
+  // capped at 4 patterns from the anchor (the 303 editor's chain limit) ──
+  var EDITOR_CHAIN_MAX = 4;
+  function chainRange(a, b) {
+    var lo = Math.min(a, b);
+    var hi = Math.min(Math.max(a, b), lo + EDITOR_CHAIN_MAX - 1);
+    var arr = [];
+    for (var i = lo; i <= hi; i++) arr.push(i);
+    return arr;
+  }
+
+  document.addEventListener('pointermove', function(e) {
+    if (!chainDragging) return;
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    while (el && (!el.classList || !el.classList.contains('pat-pill'))) el = el.parentElement;
+    if (!el) return;
+    var hoverPat = parseInt(el.dataset.pat, 10);
+    if (isNaN(hoverPat) || hoverPat === chainAnchor) return;
+    var next = chainRange(chainAnchor, hoverPat);
+    if (next.length !== dragChain.length || next[0] !== dragChain[0]) {
+      chainDragMoved = true;
+      dragChain = next;
+      refreshAllPills();
+    }
+  });
+
+  document.addEventListener('pointerup', function() {
+    if (!chainDragging) return;
+    chainDragging = false;
+    var wasDrag = chainDragMoved && dragChain.length > 1;
+    var drag = dragChain.slice();
+    dragChain = [];
+    chainDragMoved = false;
+
+    if (editLive) {
+      // Edit Live: only change what the editor shows; the 606 is untouched.
+      switchToPat(chainAnchor);
+      refreshAllPills();
+      return;
+    }
+    if (wasDrag) {
+      patChain = drag.map(function(p) { return activeGroup * PATS_PER_GROUP + p; });
+      queuedSel = -1;
+      sendChainSelect(patChain);
+      switchToPat(drag[0]);
+    } else {
+      var abs = activeGroup * PATS_PER_GROUP + chainAnchor;
+      patChain = [];
+      sendPatternSelect(abs);
+      // while running the 606 switches at the next wrap: show it as queued
+      queuedSel = (clkRunning && abs !== playingAbs) ? abs : -1;
+      switchToPat(chainAnchor);
+    }
+    refreshAllPills();
+  });
+
+  function sendPatternSelect(abs) {
+    if (!midiOut) return;
+    sendSysex(new Uint8Array([SYX_MFR, CMD_SELECT_PAT, abs & 0x1f]));
+    log('Select ' + absPatLabel(abs) + (clkRunning ? ' (at next wrap)' : ''), 'log-edit');
+  }
+  function sendChainSelect(absChain) {
+    if (!midiOut) return;
+    var inner = new Uint8Array(3 + absChain.length);
+    inner[0] = SYX_MFR; inner[1] = CMD_SELECT_CHAIN; inner[2] = absChain.length;
+    for (var i = 0; i < absChain.length; i++) inner[3 + i] = absChain[i] & 0x1f;
+    sendSysex(inner);
+    log('Chain ' + absChain.map(absPatLabel).join(' → ') + (clkRunning ? ' (at next wrap)' : ''), 'log-edit');
+  }
+
+  // View-only, like the panel's PATTERN GROUP button: shows the other group's
+  // pills without moving the selection or touching the grid's pattern.
+  function switchGroup(g) {
+    activeGroup = g;
+    var tabs = tabsEl.querySelectorAll('.group-tab');
+    for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle('is-active', i === g);
+    refreshAllPills();
+    updateButtons();
+  }
+
+  // Select slot p of the DISPLAYED group as the edited pattern.
+  function switchToPat(p) {
+    editGroup = activeGroup;
+    activePat = p & 15;
+    syncToolbar();
+    refreshAllPills();
+    renderGrid();
+    renderTracks();
+    updateButtons();
+  }
+
+  function refreshAllPills() {
+    var pills = pillsEl.querySelectorAll('.pat-pill');
+    pills.forEach(function(pill) {
+      var p = parseInt(pill.dataset.pat, 10);
+      var abs = activeGroup * PATS_PER_GROUP + p;
+      var inChain = patChain.indexOf(abs) !== -1;
+      // every state is group-true: a pill lights only when that state's
+      // pattern is really in the displayed group
+      pill.classList.toggle('is-active',  activeGroup === editGroup && p === activePat);
+      pill.classList.toggle('is-dirty',   isDirty(activeGroup, p));
+      pill.classList.toggle('is-playing', abs === playingAbs);
+      pill.classList.toggle('is-chained', inChain);
+      pill.classList.toggle('is-queued',  abs === queuedSel && abs !== playingAbs && !inChain);
+      pill.classList.toggle('is-drag-chain', dragChain.indexOf(p) !== -1 && !inChain);
+      pill.classList.toggle('is-copied',  !!copiedFrom && copiedFrom.g === activeGroup && copiedFrom.p === p);
+      var blob = groups[activeGroup][p];
+      pill.innerHTML = String(p + 1) + '<span class="pat-pill-badge">' +
+        (patternEmpty(blob) ? 'E' : getLength(blob)) + '</span>';
+    });
+  }
+
+  function updateButtons() {
+    var ok = !!midiOut && !!midiIn;
+    ['btnReq','btnReqAll','btnSendPat','btnSendGroup','btnSendAll','btnTrkSend','btnTrkReq'].forEach(function(id) {
+      document.getElementById(id).disabled = !ok;
+    });
+    document.getElementById('btnUndo').disabled  = !canUndo(editGroup, activePat);
+    document.getElementById('btnRedo').disabled  = !canRedo(editGroup, activePat);
+    document.getElementById('btnPaste').disabled = !clipboard;
+    refreshAllPills();
+  }
+
+  // Commit one edit: snapshot for undo, persist locally, mirror to hardware.
+  function commitEdit() {
+    pushHistory(editGroup, activePat);
+    saveToLS();
+    updateButtons();
+    scheduleLivePush();
+  }
+
+  // ── Toolbar (steps + scale) ────────────────────────────────────────
+  function syncToolbar() {
+    var blob = activeBlob();
+    document.getElementById('patLen').value = String(getLength(blob));
+    var scale = getScale(blob);
+    document.querySelectorAll('.scale-btn').forEach(function(b) {
+      b.classList.toggle('btn-primary', parseInt(b.dataset.scale, 10) === scale);
+    });
+  }
+
+  function applyLength(len) {
+    var blob = activeBlob();
+    len = Math.min(MAX_STEPS, Math.max(1, len | 0));
+    if (len === getLength(blob)) return;
+    setLength(blob, len);
+    commitEdit();
+    syncToolbar();
+    renderGrid();
+  }
+  document.getElementById('patLen').addEventListener('change', function() {
+    applyLength(Number(this.value));
+  });
+  document.getElementById('patLenDec').addEventListener('click', function() {
+    applyLength(getLength(activeBlob()) - 1);
+  });
+  document.getElementById('patLenInc').addEventListener('click', function() {
+    applyLength(getLength(activeBlob()) + 1);
+  });
+  document.querySelectorAll('.scale-btn').forEach(function(b) {
+    b.addEventListener('click', function() {
+      var blob = activeBlob();
+      var v = parseInt(b.dataset.scale, 10);
+      if (v === getScale(blob)) return;
+      setScale(blob, v);
+      commitEdit();
+      syncToolbar();
+      log('Scale → ' + SCALE_LABELS[v] +
+          (clkRunning && activeAbs() === playingAbs ? ' (applies at the next loop start)' : ''), 'log-edit');
+    });
+  });
+
+  // ── Drum grid ──────────────────────────────────────────────────────
+  var paint = { active: false, value: 0, touched: false };
+
+  function cellEl(inst, s) {
+    return document.querySelector('.dg-cell[data-inst="' + inst + '"][data-s="' + s + '"]');
+  }
+
+  function renderGrid() {
+    var grid = document.getElementById('drumGrid');
+    grid.innerHTML = '';
+    var blob = activeBlob();
+    var len = getLength(blob);
+
+    // header row: corner + step numbers with playhead dots
+    var corner = document.createElement('div');
+    corner.className = 'dg-corner';
+    corner.textContent = 'Instrument';
+    grid.appendChild(corner);
+    for (var s = 0; s < MAX_STEPS; s++) {
+      var h = document.createElement('div');
+      h.className = 'dg-head' + (s % 4 === 0 ? ' is-beat' : '') + (s >= len ? ' is-beyond' : '');
+      h.dataset.s = s;
+      h.textContent = String(s + 1).padStart(2, '0');
+      var dot = document.createElement('div');
+      dot.className = 'dg-play-dot';
+      h.appendChild(dot);
+      grid.appendChild(h);
+    }
+
+    // one row per instrument: label + tools + 16 cells
+    for (var inst = 0; inst < NUM_INSTRUMENTS; inst++) {
+      var meta = INSTRUMENTS[inst];
+      var lbl = document.createElement('div');
+      lbl.className = 'dg-rowlbl' + (inst === 0 ? ' dg-row-ac' : '');
+      // CSS targets rows via the cells' own class, so tag the label and every
+      // cell of the accent row with dg-row-ac.
+      var abbr = document.createElement('span');
+      abbr.className = 'dg-abbr';
+      abbr.textContent = meta.id;
+      var name = document.createElement('span');
+      name.className = 'dg-name';
+      name.textContent = meta.name;
+      var toolsEl = document.createElement('div');
+      toolsEl.className = 'dg-rowtools';
+      [
+        ['←', 'Rotate row one step earlier', function(i) { rotateRow(activeBlob(), i, -1); }],
+        ['→', 'Rotate row one step later',  function(i) { rotateRow(activeBlob(), i, +1); }],
+        ['R',      'Randomize row',              function(i) { randomRow(activeBlob(), i); }],
+        ['✕', 'Clear row',                  function(i) { clearRow(activeBlob(), i); }]
+      ].forEach(function(spec) {
+        var tb = document.createElement('button');
+        tb.className = 'dg-tool';
+        tb.textContent = spec[0];
+        tb.title = spec[1] + ' — ' + meta.name;
+        tb.addEventListener('click', (function(i, fn) {
+          return function() { fn(i); commitEdit(); renderGrid(); };
+        })(inst, spec[2]));
+        toolsEl.appendChild(tb);
+      });
+      lbl.appendChild(abbr);
+      lbl.appendChild(name);
+      lbl.appendChild(toolsEl);
+      grid.appendChild(lbl);
+
+      for (var st = 0; st < MAX_STEPS; st++) {
+        var c = document.createElement('div');
+        c.className = 'dg-cell'
+          + (inst === 0 ? ' dg-row-ac' : '')
+          + (st % 4 === 0 ? ' is-beat' : '')
+          + (st >= len ? ' is-beyond' : '')
+          + (stepOn(blob, inst, st) ? ' is-on' : '')
+          + (st === playingStep ? ' is-playing-col' : '');
+        c.dataset.inst = inst;
+        c.dataset.s = st;
+        grid.appendChild(c);
+      }
+    }
+    updatePlayheadUI();
+  }
+
+  function applyPaint(el) {
+    var inst = parseInt(el.dataset.inst, 10);
+    var s = parseInt(el.dataset.s, 10);
+    if (isNaN(inst) || isNaN(s)) return;
+    if (s >= getLength(activeBlob())) return;
+    if (stepOn(activeBlob(), inst, s) === paint.value) return;
+    setStep(activeBlob(), inst, s, paint.value);
+    el.classList.toggle('is-on', !!paint.value);
+    paint.touched = true;
+    // no audition here: a painted step sounds when the sequencer reaches it
+    // (the firmware still one-shot-triggers MIDI Note Ons, for pads/DAWs)
+  }
+
+  document.getElementById('drumGrid').addEventListener('pointerdown', function(e) {
+    var el = e.target.closest('.dg-cell');
+    if (!el || el.classList.contains('is-beyond')) return;
+    var inst = parseInt(el.dataset.inst, 10);
+    var s = parseInt(el.dataset.s, 10);
+    paint.active = true;
+    paint.value = stepOn(activeBlob(), inst, s) ? 0 : 1;
+    paint.touched = false;
+    applyPaint(el);
+    e.preventDefault();
+  });
+  document.addEventListener('pointermove', function(e) {
+    if (!paint.active) return;
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    el = el && el.closest ? el.closest('.dg-cell') : null;
+    if (el && !el.classList.contains('is-beyond')) applyPaint(el);
+  });
+  document.addEventListener('pointerup', function() {
+    if (!paint.active) return;
+    paint.active = false;
+    if (paint.touched) commitEdit();
+  });
+
+  // ── Edits / clipboard / tools ──────────────────────────────────────
+  document.getElementById('btnUndo').addEventListener('click', function() {
+    doUndo(editGroup, activePat);
+    saveToLS(); syncToolbar(); renderGrid(); updateButtons(); scheduleLivePush();
+    log('Undo ' + GROUP_NAMES[editGroup] + ' P' + (activePat + 1), 'log-edit');
+  });
+  document.getElementById('btnRedo').addEventListener('click', function() {
+    doRedo(editGroup, activePat);
+    saveToLS(); syncToolbar(); renderGrid(); updateButtons(); scheduleLivePush();
+    log('Redo ' + GROUP_NAMES[editGroup] + ' P' + (activePat + 1), 'log-edit');
+  });
+  document.getElementById('btnClearPat').addEventListener('click', function() {
+    groups[editGroup][activePat] = makeBlankPat();
+    commitEdit();
+    syncToolbar(); renderGrid();
+    log('Cleared ' + GROUP_NAMES[editGroup] + ' P' + (activePat + 1), 'log-edit');
+  });
+  document.getElementById('btnCopy').addEventListener('click', function() {
+    clipboard = cloneU8(activeBlob());
+    copiedFrom = { g: editGroup, p: activePat };
+    document.getElementById('copyStatus').textContent =
+      'Copied ' + GROUP_NAMES[editGroup] + ' P' + (activePat + 1);
+    updateButtons();
+  });
+  document.getElementById('btnPaste').addEventListener('click', function() {
+    if (!clipboard) return;
+    activeBlob().set(clipboard);
+    commitEdit();
+    syncToolbar(); renderGrid();
+    log('Pasted into ' + GROUP_NAMES[editGroup] + ' P' + (activePat + 1), 'log-edit');
+  });
+  document.getElementById('btnNudgeL').addEventListener('click', function() {
+    for (var i = 0; i < NUM_INSTRUMENTS; i++) rotateRow(activeBlob(), i, -1);
+    commitEdit(); renderGrid();
+  });
+  document.getElementById('btnNudgeR').addEventListener('click', function() {
+    for (var i = 0; i < NUM_INSTRUMENTS; i++) rotateRow(activeBlob(), i, +1);
+    commitEdit(); renderGrid();
+  });
+  document.getElementById('btnRandAll').addEventListener('click', function() {
+    for (var i = 0; i < NUM_INSTRUMENTS; i++) randomRow(activeBlob(), i);
+    commitEdit(); renderGrid();
+    log('Randomized ' + GROUP_NAMES[editGroup] + ' P' + (activePat + 1), 'log-edit');
+  });
+
+  // ── Edit Live + Live Push toggles ──────────────────────────────────
+  var editLiveBtn = document.getElementById('btnEditLive');
+  function renderEditLive() { editLiveBtn.classList.toggle('is-on', editLive); }
+  editLiveBtn.addEventListener('click', function() {
+    editLive = !editLive;
+    try { localStorage.setItem(LS_EDIT_LIVE, editLive ? 'on' : 'off'); } catch(e) {}
+    renderEditLive();
+    log('Edit Live ' + (editLive ? 'ON — editor detached from the 606' : 'OFF — editor follows the 606'), 'log-edit');
+  });
+  renderEditLive();
+
+  // Every edit mirrors to the 606 (debounced); there is no off switch — the
+  // editor and the hardware hold the same data by design.
+  function scheduleLivePush() {
+    if (!midiOut) return;
+    if (liveTimer) clearTimeout(liveTimer);
+    liveTimer = setTimeout(function() {
+      liveTimer = null;
+      sendPatternMsg(activeAbs());
+      lastPush = { g: editGroup, p: activePat };
+    }, 150);
+  }
+
+  // ── Tracks panel ───────────────────────────────────────────────────
+  var trkTabsEl = document.getElementById('trkTabs');
+  for (var ti = 0; ti < NUM_TRACKS; ti++) {
+    (function(t) {
+      var b = document.createElement('button');
+      b.className = 'trk-tab' + (t === 0 ? ' is-active' : '');
+      b.textContent = 'T' + (t + 1);
+      b.addEventListener('click', function() {
+        activeTrack = t;
+        renderTracks();
+      });
+      trkTabsEl.appendChild(b);
+    })(ti);
+  }
+
+  function absPatLabel(abs) {
+    return 'P' + ((abs % PATS_PER_GROUP) + 1) + '·' + (abs < PATS_PER_GROUP ? 'I' : 'II');
+  }
+
+  function renderTracks() {
+    var tabs = trkTabsEl.querySelectorAll('.trk-tab');
+    for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle('is-active', i === activeTrack);
+
+    var trk = tracks[activeTrack];
+    var chainEl = document.getElementById('trkChain');
+    chainEl.innerHTML = '';
+    if (trk.len === 0) {
+      var em = document.createElement('span');
+      em.className = 'trk-empty';
+      em.textContent = 'Empty track — add patterns with "+ Add Current Pattern"';
+      chainEl.appendChild(em);
+    }
+    for (var s = 0; s < trk.len; s++) {
+      (function(slot) {
+        var d = document.createElement('div');
+        d.className = 'trk-slot';
+        var span = document.createElement('span');
+        span.textContent = String(slot + 1) + ': ' + absPatLabel(trk.pat[slot]);
+        var x = document.createElement('button');
+        x.className = 'trk-slot-x';
+        x.textContent = '✕';
+        x.title = 'Remove this entry';
+        x.addEventListener('click', function() {
+          for (var i = slot; i < trk.len - 1; i++) trk.pat[i] = trk.pat[i + 1];
+          trk.len--;
+          saveToLS();
+          renderTracks();
+        });
+        d.appendChild(span);
+        d.appendChild(x);
+        chainEl.appendChild(d);
+      })(s);
+    }
+    document.getElementById('trkCount').textContent = trk.len + ' / ' + TRACK_MAX_PATS;
+    var used = 0;
+    for (var t = 0; t < NUM_TRACKS; t++) if (tracks[t].len) used++;
+    document.getElementById('trkInfo').textContent =
+      'Track ' + (activeTrack + 1) + ' · ' + used + ' of 8 in use';
+  }
+
+  document.getElementById('btnTrkAdd').addEventListener('click', function() {
+    var trk = tracks[activeTrack];
+    if (trk.len >= TRACK_MAX_PATS) { showErrorToast('Track is full (64 patterns)'); return; }
+    trk.pat[trk.len++] = activeAbs();
+    saveToLS();
+    renderTracks();
+  });
+  document.getElementById('btnTrkRemove').addEventListener('click', function() {
+    var trk = tracks[activeTrack];
+    if (trk.len > 0) { trk.len--; saveToLS(); renderTracks(); }
+  });
+  document.getElementById('btnTrkClear').addEventListener('click', function() {
+    tracks[activeTrack].len = 0;
+    saveToLS();
+    renderTracks();
+  });
+  document.getElementById('btnTrkSend').addEventListener('click', function() {
+    sendTrackMsg(activeTrack);
+  });
+  document.getElementById('btnTrkReq').addEventListener('click', function() {
+    sendSysex(new Uint8Array([SYX_MFR, CMD_REQ_TRACK, activeTrack & 7]));
+  });
+
+  // ── Pattern library ────────────────────────────────────────────────
+  // A flat list of single patterns kept in local storage: add the current
+  // grid, or upload pattern/group/all JSON files (each pattern becomes one
+  // entry). Load puts an entry into the slot currently shown in the grid
+  // (and live-pushes it to the 606 like any other edit).
+  var library = [];   // [{ name, data: <patternToJSON object> }]
+
+  function saveLib() {
+    try { localStorage.setItem(LS_LIB, JSON.stringify(library)); } catch(e) { /* quota */ }
+  }
+  function loadLib() {
+    try {
+      var raw = localStorage.getItem(LS_LIB);
+      var arr = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(arr)) library = arr.filter(function(it) { return it && it.data; });
+    } catch(e) { library = []; }
+  }
+
+  function renderLib() {
+    var list = document.getElementById('libList');
+    list.innerHTML = '';
+    if (!library.length) {
+      var em = document.createElement('div');
+      em.className = 'lib-empty';
+      em.textContent = 'Library is empty — add the current pattern or upload JSON files';
+      list.appendChild(em);
+    }
+    library.forEach(function(item, idx) {
+      var row = document.createElement('div');
+      row.className = 'lib-item';
+      var lbl = document.createElement('span');
+      lbl.className = 'lib-item-label';
+      lbl.textContent = item.name;
+      var loadBtn = document.createElement('button');
+      loadBtn.className = 'btn';
+      loadBtn.textContent = 'Load';
+      loadBtn.title = 'Load into ' + GROUP_NAMES[editGroup] + ' P' + (activePat + 1);
+      loadBtn.addEventListener('click', function() {
+        patternFromJSON(item.data, activeBlob());
+        commitEdit();
+        syncToolbar(); renderGrid();
+        log('Library: loaded "' + item.name + '" into ' + GROUP_NAMES[editGroup] + ' P' + (activePat + 1), 'log-edit');
+      });
+      var delBtn = document.createElement('button');
+      delBtn.className = 'btn';
+      delBtn.textContent = '✕';
+      delBtn.title = 'Remove from library';
+      delBtn.addEventListener('click', function() {
+        library.splice(idx, 1);
+        saveLib(); renderLib();
+      });
+      row.appendChild(lbl);
+      row.appendChild(loadBtn);
+      row.appendChild(delBtn);
+      list.appendChild(row);
+    });
+    document.getElementById('libCount').textContent =
+      library.length + (library.length === 1 ? ' pattern' : ' patterns');
+  }
+
+  document.getElementById('btnLibAdd').addEventListener('click', function() {
+    library.push({
+      name: GROUP_NAMES[editGroup] + ' P' + (activePat + 1) + ' — ' + new Date().toLocaleString(),
+      data: patternToJSON(editGroup, activePat)
+    });
+    saveLib(); renderLib();
+  });
+  document.getElementById('btnLibClear').addEventListener('click', function() {
+    library = [];
+    saveLib(); renderLib();
+  });
+  document.getElementById('btnLibUpload').addEventListener('click', function() {
+    document.getElementById('libFileInput').click();
+  });
+  document.getElementById('libFileInput').addEventListener('change', function() {
+    var files = Array.from(this.files || []);
+    this.value = '';
+    files.forEach(function(f) {
+      var rd = new FileReader();
+      rd.onload = function() {
+        var obj;
+        try { obj = JSON.parse(rd.result); }
+        catch(e) { showErrorToast(f.name + ': not valid JSON'); return; }
+        var base = f.name.replace(/\.json$/i, '');
+        var added = 0;
+        if (obj && obj.type === '606-pattern') {
+          library.push({ name: base, data: obj });
+          added = 1;
+        } else if (obj && Array.isArray(obj.patterns)) {   // 606-group / 606-all
+          obj.patterns.forEach(function(p) {
+            library.push({
+              name: base + ' — G' + (p.group || (obj.group || 1)) + '·P' + (p.pattern || '?'),
+              data: p
+            });
+            added++;
+          });
+        } else {
+          showErrorToast(f.name + ': unrecognized JSON type');
+          return;
+        }
+        saveLib(); renderLib();
+        log('Library: added ' + added + ' pattern' + (added === 1 ? '' : 's') + ' from ' + f.name, 'log-edit');
+      };
+      rd.readAsText(f);
+    });
+  });
+
+  loadLib();
+
+  // ── Toasts ─────────────────────────────────────────────────────────
+  var errorToastTimer = null;
+  function showErrorToast(msg) {
+    var el = document.getElementById('errorToast');
+    el.textContent = msg;
+    el.classList.add('visible');
+    if (errorToastTimer) clearTimeout(errorToastTimer);
+    errorToastTimer = setTimeout(function() {
+      el.classList.remove('visible');
+      errorToastTimer = null;
+    }, 2500);
+  }
+  function showDownloadToast(msg) {
+    var el = document.getElementById('downloadToast');
+    el.textContent = msg;
+    el.classList.add('visible');
+    setTimeout(function() { el.classList.remove('visible'); }, 3000);
+  }
+
+  // ── Save / load JSON ───────────────────────────────────────────────
+  // Steps serialize as arrays of 1-based step numbers per instrument id, so
+  // the files stay human readable/editable:  "steps": { "BD": [1,5,9,13], ... }
+  var JSON_VERSION = 1;
+  function nowISO() { return new Date().toISOString(); }
+
+  function patternToJSON(g, p) {
+    var blob = groups[g][p];
+    var steps = {};
+    for (var i = 0; i < NUM_INSTRUMENTS; i++) {
+      var arr = [];
+      for (var s = 0; s < MAX_STEPS; s++) if (stepOn(blob, i, s)) arr.push(s + 1);
+      steps[INSTRUMENTS[i].id] = arr;
+    }
+    return {
+      group: g + 1, pattern: p + 1,
+      length: getLength(blob), scale: getScale(blob) + 1,
+      steps: steps
+    };
+  }
+  function patternFromJSON(obj, blob) {
+    blob.fill(0);
+    setLength(blob, (obj.length | 0) || MAX_STEPS);
+    var sc = (obj.scale | 0) - 1;
+    setScale(blob, sc >= 0 && sc <= 3 ? sc : 0);
+    for (var i = 0; i < NUM_INSTRUMENTS; i++) {
+      var arr = obj.steps && obj.steps[INSTRUMENTS[i].id];
+      if (!Array.isArray(arr)) continue;
+      for (var k = 0; k < arr.length; k++) {
+        var s = (arr[k] | 0) - 1;
+        if (s >= 0 && s < MAX_STEPS) setStep(blob, i, s, 1);
+      }
+    }
+  }
+  function trackToJSON(t) {
+    var trk = tracks[t], chain = [];
+    for (var s = 0; s < trk.len; s++) {
+      chain.push({ group: trk.pat[s] < PATS_PER_GROUP ? 1 : 2, pattern: (trk.pat[s] % PATS_PER_GROUP) + 1 });
+    }
+    return { track: t + 1, chain: chain };
+  }
+
+  function saveJSON(obj, fname) {
+    var payload = JSON.stringify(obj, null, 2);
+    var url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+    var a = document.createElement('a'); a.href = url; a.download = fname; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  document.getElementById('btnSavePattern').addEventListener('click', function() {
+    var obj = { version: JSON_VERSION, type: '606-pattern', device: 'SuperOS-606', saved_at: nowISO() };
+    Object.assign(obj, patternToJSON(editGroup, activePat));
+    saveJSON(obj, 'superos606-g' + (editGroup + 1) + 'p' + (activePat + 1) + '.json');
+    showDownloadToast('Saved pattern JSON');
+  });
+  document.getElementById('btnSaveGroup').addEventListener('click', function() {
+    var pats = [];
+    for (var p = 0; p < PATS_PER_GROUP; p++) pats.push(patternToJSON(activeGroup, p));
+    saveJSON({ version: JSON_VERSION, type: '606-group', device: 'SuperOS-606', saved_at: nowISO(),
+               group: activeGroup + 1, patterns: pats },
+             'superos606-group' + (activeGroup + 1) + '.json');
+    showDownloadToast('Saved group JSON');
+  });
+  document.getElementById('btnSaveAll').addEventListener('click', function() {
+    var pats = [], trks = [];
+    for (var g = 0; g < NUM_GROUPS; g++)
+      for (var p = 0; p < PATS_PER_GROUP; p++) pats.push(patternToJSON(g, p));
+    for (var t = 0; t < NUM_TRACKS; t++) trks.push(trackToJSON(t));
+    saveJSON({ version: JSON_VERSION, type: '606-all', device: 'SuperOS-606', saved_at: nowISO(),
+               patterns: pats, tracks: trks },
+             'superos606-all.json');
+    showDownloadToast('Saved all patterns + tracks');
+  });
+
+  document.getElementById('btnLoadJson').addEventListener('click', function() {
+    document.getElementById('fileInput').click();
+  });
+  document.getElementById('fileInput').addEventListener('change', function() {
+    var f = this.files && this.files[0];
+    this.value = '';
+    if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function() {
+      var obj;
+      try { obj = JSON.parse(rd.result); }
+      catch(e) { showErrorToast('Not valid JSON'); return; }
+      loadJSONObject(obj);
+    };
+    rd.readAsText(f);
+  });
+
+  function loadJSONObject(obj) {
+    if (!obj || typeof obj !== 'object') { showErrorToast('Unrecognized file'); return; }
+    if (obj.type === '606-pattern') {
+      // single pattern loads into the slot currently shown in the grid
+      patternFromJSON(obj, activeBlob());
+      commitEdit();
+      syncToolbar(); renderGrid();
+      log('Loaded pattern JSON into ' + GROUP_NAMES[editGroup] + ' P' + (activePat + 1), 'log-edit');
+    } else if (obj.type === '606-group' && Array.isArray(obj.patterns)) {
+      // a group file loads into the group currently shown
+      for (var i = 0; i < obj.patterns.length && i < PATS_PER_GROUP; i++) {
+        var p = ((obj.patterns[i].pattern | 0) || (i + 1)) - 1;
+        if (p < 0 || p >= PATS_PER_GROUP) p = i;
+        patternFromJSON(obj.patterns[i], groups[activeGroup][p]);
+        pushHistory(activeGroup, p);
+      }
+      saveToLS();
+      syncToolbar(); refreshAllPills(); renderGrid(); updateButtons();
+      log('Loaded group JSON into ' + GROUP_NAMES[activeGroup], 'log-edit');
+    } else if (obj.type === '606-all' && Array.isArray(obj.patterns)) {
+      for (var i2 = 0; i2 < obj.patterns.length && i2 < NUM_PATTERNS; i2++) {
+        var src = obj.patterns[i2];
+        var g = ((src.group | 0) || 1) - 1;
+        var pp = ((src.pattern | 0) || 1) - 1;
+        if (g < 0 || g >= NUM_GROUPS || pp < 0 || pp >= PATS_PER_GROUP) continue;
+        patternFromJSON(src, groups[g][pp]);
+        pushHistory(g, pp);
+      }
+      if (Array.isArray(obj.tracks)) {
+        for (var t = 0; t < obj.tracks.length && t < NUM_TRACKS; t++) {
+          var st = obj.tracks[t];
+          var tn = ((st.track | 0) || (t + 1)) - 1;
+          if (tn < 0 || tn >= NUM_TRACKS || !Array.isArray(st.chain)) continue;
+          tracks[tn].len = 0;
+          for (var c = 0; c < st.chain.length && c < TRACK_MAX_PATS; c++) {
+            var cg = ((st.chain[c].group | 0) || 1) - 1;
+            var cp = ((st.chain[c].pattern | 0) || 1) - 1;
+            if (cg < 0 || cg >= NUM_GROUPS || cp < 0 || cp >= PATS_PER_GROUP) continue;
+            tracks[tn].pat[tracks[tn].len++] = cg * PATS_PER_GROUP + cp;
+          }
+        }
+      }
+      saveToLS();
+      syncToolbar(); refreshAllPills(); renderGrid(); renderTracks(); updateButtons();
+      log('Loaded all patterns + tracks from JSON', 'log-edit');
+    } else {
+      showErrorToast('Unrecognized JSON type: ' + obj.type);
+    }
+  }
+
+  // ── SysEx send helpers ─────────────────────────────────────────────
+  function sendSysex(inner) {
+    if (!midiOut) { log('sendSysex: no midiOut port — connect MIDI first', 'log-err'); return; }
+    var msg = new Uint8Array(2 + inner.length);
+    msg[0] = 0xf0; msg.set(inner, 1); msg[msg.length - 1] = 0xf7;
+    var hex = Array.from(msg.subarray(0, Math.min(msg.length, 12))).map(function(b){ return b.toString(16).padStart(2,'0'); }).join(' ');
+    log('TX SysEx [' + msg.length + ' bytes]: ' + hex + (msg.length > 12 ? ' ...' : ''), 'log-syx');
+    midiOut.send(msg);
+  }
+
+  function sendPatternMsg(abs) {
+    var blob = groups[(abs / PATS_PER_GROUP) | 0][abs % PATS_PER_GROUP];
+    var x = xorBytes(blob), packed = pack7(blob);
+    var inner = new Uint8Array(5 + packed.length);
+    inner[0] = SYX_MFR; inner[1] = CMD_PUSH_PATTERN; inner[2] = abs & 0x1f;
+    inner[3] = x & 0x7f; inner[4] = (x >> 7) & 1;
+    inner.set(packed, 5);
+    sendSysex(inner);
+  }
+  function sendTrackMsg(t) {
+    var trk = tracks[t];
+    var raw = new Uint8Array(TRACK_BYTES);
+    raw[0] = trk.len;
+    raw.set(trk.pat, 1);
+    var x = xorBytes(raw), packed = pack7(raw);
+    var inner = new Uint8Array(5 + packed.length);
+    inner[0] = SYX_MFR; inner[1] = CMD_PUSH_TRACK; inner[2] = t & 7;
+    inner[3] = x & 0x7f; inner[4] = (x >> 7) & 1;
+    inner.set(packed, 5);
+    sendSysex(inner);
+  }
+
+  // ── Sync overlay ───────────────────────────────────────────────────
+  function showSyncOverlay(title, msg, total) {
+    document.getElementById('syncTitle').textContent = title;
+    document.getElementById('syncMsg').textContent = msg;
+    document.getElementById('syncBar').style.width = '0%';
+    document.getElementById('syncCount').textContent = '0 / ' + total;
+    document.getElementById('syncOverlay').classList.add('visible');
+  }
+  function updateSyncOverlay(done, total) {
+    document.getElementById('syncBar').style.width = Math.round(100 * done / total) + '%';
+    document.getElementById('syncCount').textContent = done + ' / ' + total;
+  }
+  function hideSyncOverlay() {
+    document.getElementById('syncOverlay').classList.remove('visible');
+  }
+
+  // ── Bulk download (Request Everything) ────────────────────────────
+  // Editor-driven, one item at a time: request -> wait for the dump -> next.
+  // Retries each item twice on a 1.2 s timeout, then aborts.
+  var syncQueue = [], syncTotal = 0, syncTimer = null, syncRetries = 0;
+
+  function startFullSync() {
+    if (!midiOut || !midiIn) return;
+    syncQueue = [];
+    for (var p = 0; p < NUM_PATTERNS; p++) syncQueue.push({ kind: 'pat', idx: p });
+    for (var t = 0; t < NUM_TRACKS; t++)  syncQueue.push({ kind: 'trk', idx: t });
+    syncTotal = syncQueue.length;
+    syncRetries = 0;
+    showSyncOverlay('Syncing with 606', 'Reading patterns and tracks...', syncTotal);
+    requestNextSyncItem();
+  }
+  function requestNextSyncItem() {
+    if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
+    if (!syncQueue.length) {
+      hideSyncOverlay();
+      showDownloadToast('✔ Synced 32 patterns + 8 tracks from 606');
+      log('Full sync complete', 'log-ack');
+      saveToLS();
+      syncToolbar(); refreshAllPills(); renderGrid(); renderTracks(); updateButtons();
+      return;
+    }
+    var item = syncQueue[0];
+    if (item.kind === 'pat') sendSysex(new Uint8Array([SYX_MFR, CMD_REQ_PATTERN, item.idx & 0x1f]));
+    else                     sendSysex(new Uint8Array([SYX_MFR, CMD_REQ_TRACK,   item.idx & 7]));
+    syncTimer = setTimeout(function() {
+      syncTimer = null;
+      if (++syncRetries > 2) {
+        hideSyncOverlay();
+        syncQueue = [];
+        showErrorToast('Sync timed out — check the OUT → 606 port/cable and that the app firmware is running');
+        log('Full sync aborted: no reply', 'log-err');
+        return;
+      }
+      log('Sync: no reply, retry ' + syncRetries, 'log-err');
+      requestNextSyncItem();
+    }, 1200);
+  }
+  /** A dump matching the head of the sync queue arrived; advance the queue. */
+  function syncItemDone(kind, idx) {
+    if (!syncQueue.length) return false;
+    var head = syncQueue[0];
+    if (head.kind !== kind || head.idx !== idx) return false;
+    syncQueue.shift();
+    syncRetries = 0;
+    updateSyncOverlay(syncTotal - syncQueue.length, syncTotal);
+    requestNextSyncItem();
+    return true;
+  }
+
+  // ── Bulk upload (Send Group / Everything) ──────────────────────────
+  // Pushes are paced 25 ms apart so the 606's MIDI receive buffer (drained
+  // once per ~1 ms loop pass) never overflows.
+  var sendQueue = [], sendTotal = 0, sendTimer = null;
+  function startBulkSend(items, label) {
+    if (!midiOut) return;
+    sendQueue = items.slice();
+    sendTotal = items.length;
+    showSyncOverlay('Sending to 606', label, sendTotal);
+    pumpSendQueue();
+  }
+  function pumpSendQueue() {
+    if (!sendQueue.length) {
+      hideSyncOverlay();
+      showDownloadToast('✔ Sent to 606 — saves to flash at STOP (needs the one-time service-install.syx)');
+      // everything pushed is now the device's state: mark all clean
+      for (var g = 0; g < NUM_GROUPS; g++)
+        for (var p = 0; p < PATS_PER_GROUP; p++) commitIdx[g][p] = histIdx[g][p];
+      updateButtons();
+      return;
+    }
+    var item = sendQueue.shift();
+    if (item.kind === 'pat') sendPatternMsg(item.idx);
+    else                     sendTrackMsg(item.idx);
+    updateSyncOverlay(sendTotal - sendQueue.length, sendTotal);
+    sendTimer = setTimeout(pumpSendQueue, 25);
+  }
+
+  document.getElementById('btnReq').addEventListener('click', function() {
+    requestPattern(activeAbs(), true);
+  });
+  document.getElementById('btnReqAll').addEventListener('click', startFullSync);
+  document.getElementById('btnSendPat').addEventListener('click', function() {
+    sendPatternMsg(activeAbs());
+    lastPush = { g: editGroup, p: activePat };
+  });
+  document.getElementById('btnSendGroup').addEventListener('click', function() {
+    var items = [];
+    for (var p = 0; p < PATS_PER_GROUP; p++)
+      items.push({ kind: 'pat', idx: activeGroup * PATS_PER_GROUP + p });
+    startBulkSend(items, 'Sending ' + GROUP_NAMES[activeGroup] + ' (16 patterns)...');
+  });
+  document.getElementById('btnSendAll').addEventListener('click', function() {
+    var items = [];
+    for (var p = 0; p < NUM_PATTERNS; p++) items.push({ kind: 'pat', idx: p });
+    for (var t = 0; t < NUM_TRACKS; t++)  items.push({ kind: 'trk', idx: t });
+    startBulkSend(items, 'Sending 32 patterns + 8 tracks...');
+  });
+
+  // ── SysEx receive ──────────────────────────────────────────────────
+  function syxInner(bytes) {
+    if (bytes.length < 2 || bytes[0] !== SYX_MFR) return;
+    var cmd = bytes[1];
+
+    if (cmd === CMD_PATTERN_DUMP) {
+      if (bytes.length < 5 + PACKED_PATTERN) { log('0x11 too short (' + bytes.length + ')', 'log-err'); return; }
+      var pat = bytes[2] & 0x1f;
+      var cx  = bytes[3] | (bytes[4] << 7);
+      var raw = unpack7(bytes.subarray(5), PATTERN_BYTES);
+      if (!raw)                 { log('0x11 unpack failed', 'log-err'); return; }
+      if (xorBytes(raw) !== cx) { log('0x11 checksum mismatch', 'log-err'); return; }
+      var g = (pat / PATS_PER_GROUP) | 0, p = pat % PATS_PER_GROUP;
+      groups[g][p].set(raw);
+      pushHistory(g, p);
+      commitIdx[g][p] = histIdx[g][p];
+      saveToLS();
+      log('Pattern ' + absPatLabel(pat) + ' received', 'log-syx');
+      if (pat === pendingReq) {
+        pendingReq = -1;
+        if (pendingReqTimer) { clearTimeout(pendingReqTimer); pendingReqTimer = null; }
+      }
+      if (!syncItemDone('pat', pat)) {
+        if (g === editGroup && p === activePat) { syncToolbar(); renderGrid(); }
+        refreshAllPills(); updateButtons();
+      }
+      return;
+    }
+
+    if (cmd === CMD_TRACK_DUMP) {
+      if (bytes.length < 5 + PACKED_TRACK) { log('0x25 too short (' + bytes.length + ')', 'log-err'); return; }
+      var t  = bytes[2] & 7;
+      var tx = bytes[3] | (bytes[4] << 7);
+      var traw = unpack7(bytes.subarray(5), TRACK_BYTES);
+      if (!traw)                 { log('0x25 unpack failed', 'log-err'); return; }
+      if (xorBytes(traw) !== tx) { log('0x25 checksum mismatch', 'log-err'); return; }
+      tracks[t].len = Math.min(TRACK_MAX_PATS, traw[0]);
+      for (var i = 0; i < TRACK_MAX_PATS; i++)
+        tracks[t].pat[i] = traw[1 + i] % NUM_PATTERNS;
+      saveToLS();
+      log('Track ' + (t + 1) + ' received (' + tracks[t].len + ' patterns)', 'log-syx');
+      if (!syncItemDone('trk', t)) renderTracks();
+      else renderTracks();
+      return;
+    }
+
+    if (cmd === CMD_ACK && bytes.length >= 3) {
+      var st = bytes[2];
+      log('ACK: ' + (ACK_NAMES[st] || 'status=' + st), st === 0 ? 'log-ack' : 'log-err');
+      if (st === 0 && lastPush) {
+        commitIdx[lastPush.g][lastPush.p] = histIdx[lastPush.g][lastPush.p];
+        lastPush = null;
+        updateButtons();
+      }
+      return;
+    }
+
+    if (cmd === CMD_STEP_POS && bytes.length >= 3) {
+      // pattern-start anchor: the 606 just fired step 1 of this pattern
+      var sAbs = bytes[2] & 0x1f;
+      var sChanged = sAbs !== playingAbs;
+      setPlayingPattern(sAbs, true);
+      clkTick = 0;
+      // the firmware latches the scale at each loop start, so the chase rate
+      // latches here too — a mid-loop scale edit must not desync the playhead
+      var sBlob = playingBlob();
+      playTicksPerStep = sBlob ? SCALE_TICKS[getScale(sBlob)] : 6;
+      setPlayingStep(0);
+      // a new pattern took over: refresh its data (catches panel edits)
+      if (sChanged) requestPattern(sAbs, false);
+      return;
+    }
+
+    if (cmd === CMD_ACTIVE_PAT && bytes.length >= 3) {
+      // panel selection while stopped, or the 606 just stopped: re-request the
+      // pattern so panel edits land in the editor ("auto refresh")
+      var aAbs = bytes[2] & 0x1f;
+      setPlayingPattern(aAbs, false);
+      requestPattern(aAbs, false);
+      return;
+    }
+
+    if (cmd === CMD_STEP_UPDATE && bytes.length >= 6) {
+      // live panel edit on the 606: step entry, tap write, or chase-delete
+      var uPat = bytes[2] & 0x1f, uInst = bytes[3] & 7, uStep = bytes[4] & 0x0f, uOn = bytes[5] & 1;
+      var ug = (uPat / PATS_PER_GROUP) | 0, up = uPat % PATS_PER_GROUP;
+      setStep(groups[ug][up], uInst, uStep, uOn);
+      if (ug === editGroup && up === activePat) {
+        var uCell = cellEl(uInst, uStep);
+        if (uCell) uCell.classList.toggle('is-on', !!uOn);
+      }
+      hwEditTouched(ug, up);
+      return;
+    }
+
+    if (cmd === CMD_LENGTH_UPDATE && bytes.length >= 4) {
+      var lPat = bytes[2] & 0x1f, lLen = bytes[3] & 0x1f;
+      var lg = (lPat / PATS_PER_GROUP) | 0, lp = lPat % PATS_PER_GROUP;
+      setLength(groups[lg][lp], lLen);
+      if (lg === editGroup && lp === activePat) { syncToolbar(); renderGrid(); }
+      hwEditTouched(lg, lp);
+      log('606 set ' + absPatLabel(lPat) + ' length → ' + lLen, 'log-ack');
+      return;
+    }
+
+    if (cmd === CMD_SCALE_UPDATE && bytes.length >= 4) {
+      var scPat = bytes[2] & 0x1f, scVal = bytes[3] & 3;
+      var sg = (scPat / PATS_PER_GROUP) | 0, sp = scPat % PATS_PER_GROUP;
+      setScale(groups[sg][sp], scVal);
+      if (sg === editGroup && sp === activePat) syncToolbar();
+      hwEditTouched(sg, sp);
+      log('606 set ' + absPatLabel(scPat) + ' scale → ' + SCALE_LABELS[scVal], 'log-ack');
+      return;
+    }
+  }
+
+  // Panel edits arrive as a stream of tiny messages (chase-delete can touch a
+  // step per pass of the chase). Collect them, then snapshot history / persist
+  // once the burst settles — and mark the slots clean, since they now mirror
+  // what the 606 itself holds.
+  var hwEditTimer = null, hwEditSlots = {};
+  function hwEditTouched(g, p) {
+    hwEditSlots[g + ',' + p] = true;
+    if (hwEditTimer) clearTimeout(hwEditTimer);
+    hwEditTimer = setTimeout(function() {
+      hwEditTimer = null;
+      Object.keys(hwEditSlots).forEach(function(k) {
+        var gp = k.split(',');
+        pushHistory(+gp[0], +gp[1]);
+        commitIdx[+gp[0]][+gp[1]] = histIdx[+gp[0]][+gp[1]];
+      });
+      hwEditSlots = {};
+      saveToLS();
+      refreshAllPills();
+      updateButtons();
+    }, 800);
+  }
+
+  function setPlayingPattern(abs, running) {
+    var changed = abs !== playingAbs;
+    playingAbs = abs;
+    if (running) { clkRunning = true; }
+    if (abs === queuedSel) queuedSel = -1;       // the 606 took the selection
+    // follow the hardware unless detached (Edit Live) or mid-interaction
+    if (changed && !editLive && !paint.active && !chainDragging) {
+      var g = (abs / PATS_PER_GROUP) | 0, p = abs % PATS_PER_GROUP;
+      if (g !== activeGroup) switchGroup(g);
+      if (g !== editGroup || p !== activePat) switchToPat(p);
+    }
+    refreshAllPills();
+  }
+
+  // Request one pattern from the 606. Manual requests (toolbar button) arm a
+  // timeout so a dead OUT cable / wrong port is loudly visible; automatic
+  // refreshes are fire-and-forget and skipped while a bulk sync runs.
+  function requestPattern(abs, manual) {
+    if (!midiOut) return;
+    if (!manual && syncQueue.length) return;
+    sendSysex(new Uint8Array([SYX_MFR, CMD_REQ_PATTERN, abs & 0x1f]));
+    if (manual) {
+      pendingReq = abs;
+      if (pendingReqTimer) clearTimeout(pendingReqTimer);
+      pendingReqTimer = setTimeout(function() {
+        pendingReqTimer = null;
+        if (pendingReq < 0) return;
+        pendingReq = -1;
+        log('No reply to pattern request — check the OUT → 606 port and cable', 'log-err');
+        showErrorToast('No reply from 606 — check the OUT → 606 port');
+      }, 1000);
+    }
+  }
+
+  // ── Playhead (MIDI clock derived, anchored by 0x15) ────────────────
+  function playingBlob() {
+    if (playingAbs < 0) return null;
+    return groups[(playingAbs / PATS_PER_GROUP) | 0][playingAbs % PATS_PER_GROUP];
+  }
+  function setPlayingStep(s) {
+    if (s === playingStep) return;
+    playingStep = s;
+    updatePlayheadUI();
+  }
+  function updatePlayheadUI() {
+    var showCol = (playingAbs === activeAbs() && clkRunning) ? playingStep : -1;
+    document.querySelectorAll('.dg-head').forEach(function(h) {
+      h.classList.toggle('is-playing', parseInt(h.dataset.s, 10) === showCol);
+    });
+    document.querySelectorAll('.dg-cell').forEach(function(c) {
+      c.classList.toggle('is-playing-col', parseInt(c.dataset.s, 10) === showCol);
+    });
+  }
+
+  function handleRealtime(b) {
+    if (b === 0xf8) {
+      if (!clkRunning || clkTick < 0) return;
+      clkTick++;
+      // length is live (matches the firmware) but the scale stays latched
+      // (playTicksPerStep) until the next pattern-start anchor
+      var blob = playingBlob();
+      var len = blob ? getLength(blob) : MAX_STEPS;
+      setPlayingStep(((clkTick / playTicksPerStep) | 0) % len);
+    } else if (b === 0xfa || b === 0xfb) {
+      clkRunning = true;
+      clkTick = -1;          // wait for the first 0x15 anchor
+      setPlayingStep(-1);
+    } else if (b === 0xfc) {
+      clkRunning = false;
+      clkTick = -1;
+      setPlayingStep(-1);
+      updatePlayheadUI();
+    }
+  }
+
+  // ── MIDI input plumbing ────────────────────────────────────────────
+  var lastStatus = 0, chanBuf = [];
+  function dispatchChannel(status, b1, b2) {
+    var type = status & 0xf0, ch = (status & 0x0f) + 1;
+    if (type === 0x90 && b2 > 0) {
+      var name = '';
+      for (var i = 1; i < NUM_INSTRUMENTS; i++) if (INSTRUMENTS[i].note === b1) name = INSTRUMENTS[i].id + ' ';
+      log('Note On  ch' + ch + '  ' + name + '(' + b1 + ')  vel ' + b2, 'log-note');
+    }
+  }
+  function feedChannelByte(b) {
+    if (b & 0x80) { lastStatus = b; chanBuf = [b]; return; }
+    if (chanBuf.length === 0 && lastStatus) chanBuf = [lastStatus];
+    chanBuf.push(b);
+    var type = chanBuf[0] & 0xf0, need = (type === 0xc0 || type === 0xd0) ? 2 : 3;
+    if (chanBuf.length >= need) { dispatchChannel(chanBuf[0], chanBuf[1], chanBuf[2]); chanBuf = [chanBuf[0]]; }
+  }
+
+  function drainCompleteSysex() {
+    var start = -1;
+    for (var i = 0; i < rxBuf.length; i++) {
+      if (rxBuf[i] === 0xf0) start = i;
+      else if (rxBuf[i] === 0xf7 && start >= 0) {
+        syxInner(new Uint8Array(rxBuf.slice(start + 1, i)));
+        start = -1;
+      }
+    }
+    if (start >= 0) rxBuf = rxBuf.slice(start);
+    else rxBuf = [];
+  }
+  function onMidi(ev) {
+    var d = ev.data;
+    if (!d || !d.length) return;
+    if (d[0] >= 0x80 && d[0] < 0xf0) { for (var k = 0; k < d.length; k++) feedChannelByte(d[k]); return; }
+    if (d[0] >= 0xf8) { handleRealtime(d[0]); return; }
+    if (d[0] === 0xf0) {
+      rxBuf = [];
+      for (var i = 0; i < d.length; i++) rxBuf.push(d[i]);
+      if (rxBuf[rxBuf.length - 1] === 0xf7) drainCompleteSysex();
+      return;
+    }
+    if (rxBuf.length > 0) {
+      if (d[0] < 0x80 || d[0] === 0xf7) {
+        for (var j = 0; j < d.length; j++) rxBuf.push(d[j]);
+        if (rxBuf[rxBuf.length - 1] === 0xf7) drainCompleteSysex();
+      } else if (d[0] < 0xf8) { rxBuf = []; }
+    }
+  }
+
+  // ── Port binding ───────────────────────────────────────────────────
+  function fillSel(sel, ports) {
+    sel.innerHTML = '';
+    ports.forEach(function(p) {
+      var o = document.createElement('option');
+      o.value = p.id; o.textContent = p.name || p.id;
+      sel.appendChild(o);
+    });
+    sel.disabled = !ports.length;
+  }
+
+  function populatePortSelects(access) {
+    var outs = Array.from(access.outputs.values());
+    var ins  = Array.from(access.inputs.values());
+    var selOut = document.getElementById('selOut');
+    var selIn  = document.getElementById('selIn');
+    var prevOutId = selOut.value || (midiOut && midiOut.id) || '';
+    var prevInId  = selIn.value  || (midiIn  && midiIn.id)  || '';
+    fillSel(selOut, outs);
+    fillSel(selIn,  ins);
+    if (prevOutId && outs.some(function(p){ return p.id === prevOutId; })) selOut.value = prevOutId;
+    if (prevInId  && ins.some(function(p){ return p.id === prevInId;  })) selIn.value  = prevInId;
+  }
+
+  function bindPorts(access) {
+    var outs = Array.from(access.outputs.values());
+    var ins  = Array.from(access.inputs.values());
+    var selOut = document.getElementById('selOut');
+    var selIn  = document.getElementById('selIn');
+
+    if (midiIn) midiIn.onmidimessage = null;
+    var newOut = outs.find(function(p){ return p.id === selOut.value; }) || outs[0] || null;
+    var newIn  = ins.find(function(p) { return p.id === selIn.value;  }) || ins[0]  || null;
+    // a different port pair = a different device: sync again
+    if ((newOut && newOut.id) !== (midiOut && midiOut.id) ||
+        (newIn  && newIn.id)  !== (midiIn  && midiIn.id)) {
+      autoSyncDone = false;
+    }
+    midiOut = newOut;
+    midiIn  = newIn;
+    if (midiIn) midiIn.onmidimessage = onMidi;
+
+    var statusEl = document.getElementById('midiStatus');
+    var btn      = document.getElementById('btnMidi');
+    var ok       = !!midiOut && !!midiIn;
+    if (ok) {
+      statusEl.textContent = midiOut.name + ' / ' + midiIn.name;
+      statusEl.className   = 'is-ok';
+      btn.classList.add('is-connected');
+      btn.textContent = 'Connected';
+      // pull the 606's patterns + tracks automatically on every fresh connect
+      if (!autoSyncDone) {
+        autoSyncDone = true;
+        log('Connected — auto-syncing patterns + tracks from the 606', 'log-syx');
+        setTimeout(function() { if (midiOut && midiIn && !syncQueue.length) startFullSync(); }, 400);
+      }
+    } else if (midiOut && !midiIn) {
+      statusEl.textContent = midiOut.name + ' — select input'; statusEl.className = 'is-warn';
+    } else {
+      statusEl.textContent = 'No ports found'; statusEl.className = '';
+    }
+    updateButtons();
+  }
+
+  function connectMidi() {
+    if (!navigator.requestMIDIAccess) {
+      showErrorToast('Web MIDI not supported in this browser');
+      return;
+    }
+    navigator.requestMIDIAccess({ sysex: true }).then(function(access) {
+      midiAccess = access;
+      populatePortSelects(access);
+      bindPorts(access);
+      access.onstatechange = function() {
+        populatePortSelects(access);
+        bindPorts(access);
+      };
+      log('MIDI access granted', 'log-ack');
+    }, function(err) {
+      showErrorToast('MIDI access denied: ' + err);
+      log('MIDI access denied: ' + err, 'log-err');
+    });
+  }
+  document.getElementById('btnMidi').addEventListener('click', connectMidi);
+  document.getElementById('selOut').addEventListener('change', function() { if (midiAccess) bindPorts(midiAccess); });
+  document.getElementById('selIn').addEventListener('change',  function() { if (midiAccess) bindPorts(midiAccess); });
+
+  // Connect (and so auto-sync) without a click when the browser already
+  // granted MIDI access on a previous visit — plugging in and opening the
+  // page is enough.
+  function autoConnect() {
+    if (!navigator.permissions || !navigator.permissions.query) return;
+    try {
+      navigator.permissions.query({ name: 'midi', sysex: true }).then(function(st) {
+        if (st.state === 'granted') connectMidi();
+      }, function() { /* permissions API quirk: stay manual */ });
+    } catch(e) { /* stay manual */ }
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────
+  syncToolbar();
+  refreshAllPills();
+  renderGrid();
+  renderTracks();
+  renderLib();
+  updateButtons();
+  autoConnect();
+  log('SuperOS-606 pattern editor ready — ' + NUM_PATTERNS + ' patterns × ' +
+      NUM_INSTRUMENTS + ' instruments × ' + MAX_STEPS + ' steps', 'log-ack');
+})();
+</script>
+</body>
+</html>

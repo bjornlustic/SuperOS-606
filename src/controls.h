@@ -1,8 +1,8 @@
 // SuperOS-606 — front-panel decode layer
 //
-// Confirmed by hardware. Polarity is
-// uniform: a closed/active/pressed cell reads as 1 (inputs are plain INPUT, no
-// pull-ups — keep it that way to preserve this).
+// Polarity is uniform: a closed/active/pressed cell reads as 1.
+// cell reads as 1 (inputs are plain INPUT, no pull-ups — keep it that way to
+// preserve this).
 //
 // Matrix layout (drive one PH select LOW, read PB for steps / PA for rotaries+buttons;
 // read PA with ALL selects HIGH for the "status-high" group):
@@ -16,7 +16,9 @@
 //   PATTERN CLEAR   : PH3 x PA0
 //   PATTERN GROUP   : PH3 x PA2
 //   WRITE/NEXT/TAP  : status-high PA1   (also the bootloader entry button)
-//   RUN/STOP        : hardware only (not in the matrix)
+//   RUN/STOP        : status-high PA0 = the START/STOP toggle-FF level (per the
+//                     service manual's STATUS group; not a matrix cell)
+//   TEMPO CLOCK     : status-high PA3, 24 PPQN (drives the sequencer)
 #pragma once
 #include "pins.h"
 #include "hw.h"
@@ -59,6 +61,13 @@ struct Controls {
   bool function() const { return pa(3, 1); }
   bool group() const    { return pa(3, 2); }
   bool write_tap() const { return (status_hi >> 1) & 1; }
+
+  // transport status (status-high group: RUN = PA0, tempo/DIN clock = PA3).
+  // Adjust STATUS_RUN_BIT / STATUS_CLOCK_BIT if the 606 differs.
+  static constexpr uint8_t STATUS_RUN_BIT   = 0;
+  static constexpr uint8_t STATUS_CLOCK_BIT = 3;
+  bool run() const       { return (status_hi >> STATUS_RUN_BIT) & 1; }   // START/STOP toggle-FF level
+  bool tempo_clk() const { return (status_hi >> STATUS_CLOCK_BIT) & 1; } // 24 PPQN tempo clock
 };
 
 // step-LED helper: light step LED n (0..15) on the PG x PH grid

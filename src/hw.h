@@ -1,10 +1,6 @@
-// SuperOS-606 — low-level matrix driver (diagnostic stage)
+// SuperOS-606 — low-level matrix driver
 //
-// Only touches the parts of the µPD650 interface that are SAFE regardless of the
-// exact 606 matrix ordering: it drives the PH (scan) + PG (LED) outputs and reads
-// the PB/PA inputs. All data/trigger lines are pinned OUTPUT-LOW so no drum voices
-// fire and the RAM bus stays quiet. This file will grow into the full 606 driver
-// (trigger output, etc.) once the matrix map is confirmed on the real unit.
+
 #pragma once
 #include <Arduino.h>
 #include <string.h>
@@ -59,4 +55,30 @@ inline void ScanMatrix(uint8_t cell[4], uint8_t *status) {
   PORTF = 0x0F;
 }
 
+// One combined scan + display pass (~1 ms): reads the matrix and status like
+// ScanMatrix, while also multiplexing a 16-bit step-LED frame (bit n = LED n)
+// one column at a time. Each column gets `col_us` of LED dwell, so the frame is
+// shown at ~25% duty. This is the main loop's heartbeat: calling it
+// continuously keeps the LEDs lit and the switches sampled at ~1 kHz.
+inline void ScanAndDisplay(uint16_t frame, uint8_t cell[4], uint8_t *status,
+                           uint16_t col_us = 150) {
+  PORTF = 0x0F;                       // all selects high -> status group valid
+  delayMicroseconds(3);
+  uint8_t st = 0;
+  for (uint8_t j = 0; j < 4; ++j) st |= (digitalRead(STATUS_PINS[j]) << j);
+  *status = st;
+
+  for (uint8_t s = 0; s < 4; ++s) {
+    const uint8_t leds = (uint8_t)((frame >> (4 * s)) & 0x0F);
+    PORTF = (uint8_t)((0x0F & ~(1 << s)) | (leds << 4));  // select low + LED rows
+    delayMicroseconds(3);
+    uint8_t v = 0;
+    for (uint8_t j = 0; j < 4; ++j) v |= (digitalRead(SW_PINS[j]) << j);
+    for (uint8_t j = 0; j < 4; ++j) v |= (digitalRead(STATUS_PINS[j]) << (4 + j));
+    cell[s] = v;
+    delayMicroseconds(col_us);                            // LED dwell
+  }
+  PORTF = 0x0F;
 }
+
+} // namespace hw

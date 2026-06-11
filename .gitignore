@@ -2,7 +2,6 @@
 *.syx
 *.hex
 .DS_Store
-# local reference clones (kept out of our history)
-*-reference/
+.vscode/
 docs/
 
