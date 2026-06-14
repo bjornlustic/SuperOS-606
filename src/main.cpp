@@ -33,12 +33,20 @@
 // follows the TEMPO knob (or DIN sync, via the rear switch). MIDI OUT mirrors
 // everything: clock/start/stop plus a note per drum hit.
 //
+// MIDI SYNC IN: when an external MIDI clock is arriving the sequencer slaves to
+// it instead — stepping off the incoming 24 PPQN clock and running/stopping on
+// MIDI Start/Stop/Continue — and falls back to the internal clock when it goes
+// away. The panel START/STOP and a DAW's transport are OR'd, so either can run
+// it; the received clock is forwarded to MIDI OUT for downstream gear. It is
+// auto-engaged (no spare panel control): any incoming clock takes over, so
+// unplug MIDI to play to the TEMPO knob / DIN sync again.
+//
 // Patterns and tracks persist to internal flash (see flash_persist.h) when the
 // sequencer stops — if the SPM flash service is installed (service-install.syx).
 //
-// MIDI IN carries the web pattern editor's SysEx link (tools/web-pattern-edit;
-// protocol in midi_api.h): pattern/track dumps and pushes, with pushes landing
-// in RAM immediately and persisting on the next stop / idle save.
+// MIDI IN also carries the web pattern editor's SysEx link (tools/web-pattern-
+// edit; protocol in midi_api.h): pattern/track dumps and pushes, with pushes
+// landing in RAM immediately and persisting on the next stop / idle save.
 
 #include <Arduino.h>
 #include "pins.h"
@@ -192,6 +200,18 @@ static bool tempo_blink() {
   return t < 24;
 }
 
+// --- external MIDI clock sync ----------------------------------------------
+// When an external MIDI clock is arriving the sequencer follows it (tempo +
+// transport) instead of the 606's own tempo oscillator, falling back to the
+// internal clock MCLK_TIMEOUT_MS after the last pulse. Auto-detected: there is
+// no spare panel control, so any incoming clock takes over — unplug MIDI to use
+// the TEMPO knob / DIN sync again. s_hw_run latches the panel START/STOP
+// flip-flop so it can be OR'd with the MIDI transport into one run state.
+static const uint16_t MCLK_TIMEOUT_MS = 300;
+static uint32_t s_last_mclk_ms = 0;
+static bool     s_hw_run       = false;   // panel START/STOP toggle-FF latch
+static bool     s_want_run     = false;   // combined transport (panel OR MIDI)
+
 static inline uint8_t abs_pat(uint8_t s) { return (uint8_t)(disp_group * 16 + s); }
 static inline uint16_t led_bit(uint8_t n) { return (uint16_t)1 << n; }
 
@@ -202,6 +222,10 @@ static void send_note_offs() {
 }
 
 void setup() {
+  // Pull up the MIDI RX line so an unplugged 3.5mm/DIN jack can't leave the
+  // input floating and self-clock the UART from matrix/EMI noise — which now
+  // matters because spurious 0xF8 bytes would drive the sequencer (sync IN).
+  pinMode(MIDI_IN_PIN, INPUT_PULLUP);
   Serial1.begin(31250);
   hw::Init();
   eng.Init();
@@ -401,13 +425,32 @@ void loop() {
   // 3. engine housekeeping: end a pending trigger pulse, clear step_advanced
   eng.Service();
 
-  // 4. transport — the START/STOP toggle-FF level on the status lines
-  if (runB.rising()) {
+  // 3b. drain MIDI IN early so an external clock/transport can drive this pass.
+  // mc carries the realtime clock state; received clock is already forwarded to
+  // MIDI OUT inside midi_rx_poll. SysEx/notes/program-change are handled here
+  // too (remote selections move disp_group, which sections 6/8 then display).
+  MidiClockIn mc;
+  midi_rx_poll(eng, disp_group, mc);
+  if (mc.pulses) s_last_mclk_ms = millis();
+  // uint32_t (not uint16_t) so a long gap with no clock can't alias back under
+  // the window every ~65 s and briefly suppress the internal clock.
+  const bool ext_sync = (uint32_t)(millis() - s_last_mclk_ms) < MCLK_TIMEOUT_MS;
+
+  // 4. transport — the panel START/STOP toggle-FF OR an external MIDI transport
+  // (DAW Start/Stop). Either source runs the sequencer; while a MIDI transport
+  // is active the OR keeps it running, so the panel toggle is harmlessly
+  // overridden. A fresh MIDI Start/Continue resyncs the pattern to the top even
+  // mid-run (the 606 has no pause, so Continue restarts like Start).
+  if (runB.rising())  s_hw_run = true;
+  if (runB.falling()) s_hw_run = false;
+  const bool want_run = s_hw_run || mc.transport;
+
+  if ((want_run && !s_want_run) || (mc.started && want_run)) {       // start / resync
     eng.Start(mode == TRACK_PLAY || mode == TRACK_WRITE);
     { const uint8_t sreg = SREG; cli(); s_clk_running = true; SREG = sreg; }
     midiRT(0xFA);
   }
-  if (runB.falling()) {
+  if (!want_run && s_want_run) {                                     // stop
     eng.Stop();
     send_note_offs();
     midiRT(0xFC);
@@ -417,13 +460,25 @@ void loop() {
       s_clk_running = false; s_per_stop = 0; s_stop_seen = 0; s_k_half = 0;
       SREG = sreg; }
   }
+  s_want_run = want_run;
 
-  // 5. tempo clock (24 PPQN; follows the TEMPO knob or DIN sync)
-  if (clkB.rising()) {
+  // 5. clock — step from the external MIDI clock when one is present, otherwise
+  // from the 606's own 24-PPQN tempo clock (TEMPO knob / DIN sync). External
+  // pulses were already forwarded to MIDI OUT on receipt; the internal clock is
+  // mirrored to OUT here, so the 606 is a free-running clock master when not
+  // slaved. Multiple MIDI pulses can land in one pass (e.g. behind a SysEx
+  // burst) — drain them all so the tempo never lags.
+  uint8_t ticks = 0;
+  if (ext_sync) {
+    ticks = mc.pulses;
+  } else if (clkB.rising()) {
     // feed the tempo tracker from the clean polled edges too (while running
     // the pulses are wide squares, so this path catches every one)
     { const uint8_t sreg = SREG; cli(); clk_track_edge(micros()); SREG = sreg; }
     midiRT(0xF8);
+    ticks = 1;
+  }
+  for (uint8_t t = 0; t < ticks; ++t) {
     if (eng.ClockTick()) {
       send_note_offs();                              // close last step's notes
       for (uint8_t i = INST_BD; i < NUM_INSTRUMENTS; ++i)
@@ -448,12 +503,12 @@ void loop() {
     case TRACK_WRITE:   handle_track_modes(mode, inst); break;
   }
 
-  // 7. web-editor MIDI link: parse incoming SysEx (pattern/track transfer,
-  // remote pattern/chain selection) and note triggers, pump the outgoing
-  // queue, and persist pushed data once the line goes idle while stopped
-  // (never mid-transfer — each SPM page write halts the CPU and would drop
-  // incoming MIDI bytes). Remote selections move disp_group with them.
-  midi_poll(eng, disp_group);
+  // 7. web-editor MIDI link, outgoing side: broadcast the selected pattern
+  // (0x1E), service queued pattern/track dumps, and pump the TX queue. Incoming
+  // SysEx/notes were already handled in step 3b. Pushed data persists once the
+  // line goes idle while stopped (never mid-transfer — each SPM page write
+  // halts the CPU and would drop incoming MIDI bytes).
+  midi_tx_service(eng);
   if (midi_take_save_request(eng)) save_dirty(eng);
 
   // 8. PATTERN GROUP I/II indicator + next display frame (the stopped tempo

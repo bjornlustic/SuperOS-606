@@ -268,6 +268,37 @@ static void handle_sysex(Engine &eng, uint8_t &disp_group) {
 static uint8_t chan_status = 0;     // last Note On / Program Change status (0 = none)
 static uint8_t chan_d1     = 0xFF;  // pending first data byte (0xFF = none)
 
+// ---------------------------------------------------------------------------
+// MIDI-IN System Real-Time (external clock sync)
+// ---------------------------------------------------------------------------
+// These bytes (0xF8..0xFF) may legally appear ANYWHERE in the stream, even in
+// the middle of a SysEx dump or a channel message, so they are handled before
+// any of the capture/running-status logic and never disturb it. The counters
+// below are drained once per loop pass into the caller's MidiClockIn.
+static uint8_t s_clk_pulses = 0;     // 0xF8 ticks accumulated since the last poll
+static bool    s_transport  = false; // running: between Start/Continue and Stop
+static bool    s_start_edge = false; // Start or Continue seen this poll
+static bool    s_stop_edge  = false; // Stop seen this poll
+
+static void rt_byte(uint8_t b) {
+  switch (b) {
+    case 0xF8:                        // Clock: count it for the sequencer, and
+      if (s_clk_pulses < 250) ++s_clk_pulses;  // forward 1:1 to MIDI OUT so any
+      Serial1.write(0xF8);            // downstream gear chases the same clock
+      break;
+    case 0xFA:                        // Start
+    case 0xFB:                        // Continue (the 606 has no pause/resume, so
+      s_transport  = true;            // this restarts the pattern, same as Start)
+      s_start_edge = true;
+      break;
+    case 0xFC:                        // Stop
+      s_transport = false;
+      s_stop_edge = true;
+      break;
+    default: break;                   // 0xF9/0xFD reserved, 0xFE sensing, 0xFF reset: ignore
+  }
+}
+
 static void chan_byte(Engine &eng, uint8_t &disp_group, uint8_t b) {
   if (b & 0x80) {
     const uint8_t type = b & 0xF0;
@@ -292,7 +323,7 @@ static void chan_byte(Engine &eng, uint8_t &disp_group, uint8_t b) {
 }
 
 static void rx_byte(Engine &eng, uint8_t &disp_group, uint8_t b) {
-  if (b >= 0xF8) return;                  // realtime: legal anywhere, nothing to do
+  if (b >= 0xF8) { rt_byte(b); return; }  // realtime: legal anywhere (even mid-SysEx)
   if (b == 0xF0) {                        // (re)start capture
     rx_active = true;
     rx_len = 0;
@@ -314,12 +345,25 @@ static void rx_byte(Engine &eng, uint8_t &disp_group, uint8_t b) {
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
-void midi_poll(Engine &eng, uint8_t &disp_group) {
+void midi_rx_poll(Engine &eng, uint8_t &disp_group, MidiClockIn &mc) {
+  s_clk_pulses = 0;                       // reset the per-poll realtime accumulators
+  s_start_edge = false;
+  s_stop_edge  = false;
+
   while (Serial1.available() > 0) {
-    rx_byte(eng, disp_group, (uint8_t)Serial1.read());
-    last_rx_ms = millis();
+    const uint8_t b = (uint8_t)Serial1.read();
+    rx_byte(eng, disp_group, b);
+    if (b < 0xF8) last_rx_ms = millis();   // a streaming clock must NOT keep the
+                                           // idle-save gate from ever opening
   }
 
+  mc.pulses    = s_clk_pulses;
+  mc.transport = s_transport;
+  mc.started   = s_start_edge;
+  mc.stopped   = s_stop_edge;
+}
+
+void midi_tx_service(Engine &eng) {
   // Broadcast the selected pattern (0x1E) whenever it changes while stopped,
   // and on every run->stop transition. The editor re-requests the pattern on
   // each 0x1E, which is how panel edits find their way back to the browser.

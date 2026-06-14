@@ -37,6 +37,14 @@
 // Velocity >= 100 asserts the accent line for the hit. MIDI Program Change
 // 0-31 (any channel) selects that pattern, same semantics as 0x1D.
 //
+// MIDI sync (external clock IN): System Real-Time messages slave the sequencer
+// to an external MIDI clock. While clock (0xF8) is arriving the sequencer steps
+// off it at 24 PPQN instead of the 606's own tempo oscillator, and Start/Stop/
+// Continue (0xFA/0xFC/0xFB) run and stop it; it falls back to the internal
+// TEMPO-knob / DIN clock once the external clock stops. Auto-detected — any
+// incoming clock takes over (there is no spare panel control to gate it). The
+// received clock is forwarded 1:1 to MIDI OUT so downstream gear stays in sync.
+//
 // Pushed patterns/tracks land in RAM immediately (audible on the next step)
 // and are flagged dirty; flash persistence happens through the normal
 // save-on-stop path plus an idle save the main loop performs when
@@ -47,11 +55,29 @@
 
 class Engine;
 
-/// Drain MIDI IN (SysEx commands + note triggers) and pump the outgoing
-/// message queue. Call once per main-loop pass. `disp_group` is the panel's
-/// displayed pattern-group; remote selections update it so the LEDs follow.
-/// Also broadcasts 0x1E on stopped selection changes and on every stop.
-void midi_poll(Engine &eng, uint8_t &disp_group);
+/// External MIDI clock-in state, filled by midi_rx_poll() each loop pass so
+/// main.cpp can clock the sequencer from an external MIDI source.
+struct MidiClockIn {
+  uint8_t pulses    = 0;      ///< 0xF8 clock ticks received since the last poll
+  bool    transport = false;  ///< running: between a MIDI Start/Continue and a Stop
+  bool    started   = false;  ///< a Start/Continue arrived this poll (resync to step 0)
+  bool    stopped   = false;  ///< a Stop arrived this poll
+};
+
+/// Drain MIDI IN for this loop pass: SysEx (pattern/track transfer, remote
+/// select), channel messages (note triggers, program change), AND System
+/// Real-Time clock/transport. The realtime state is reported in `mc` so the
+/// main loop can step the sequencer off an external clock; received clock is
+/// forwarded 1:1 to MIDI OUT here. Call near the top of the loop, before
+/// transport/clock processing. `disp_group` follows remote selections so the
+/// panel LEDs match.
+void midi_rx_poll(Engine &eng, uint8_t &disp_group, MidiClockIn &mc);
+
+/// Outgoing-side housekeeping: broadcast 0x1E on stopped selection changes and
+/// on every run->stop, service queued pattern/track dumps, and pump the TX
+/// queue. Call once per loop pass, AFTER transport/mode processing (it reads
+/// eng.running / eng.cur_pat, which those steps update).
+void midi_tx_service(Engine &eng);
 
 /// Queue one complete MIDI message for transmit. Messages go out atomically
 /// (never interleaved with each other) and only as fast as the UART can take
