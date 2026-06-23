@@ -8,6 +8,7 @@
 #include "pattern.h"
 #include "engine.h"
 #include "midi_api.h"
+#include "settings.h"
 
 // ---------------------------------------------------------------------------
 // Protocol constants
@@ -27,6 +28,9 @@ static constexpr uint8_t CMD_ACTIVE_PAT    = 0x1E;
 static constexpr uint8_t CMD_REQ_TRACK     = 0x24;
 static constexpr uint8_t CMD_TRACK_DUMP    = 0x25;
 static constexpr uint8_t CMD_PUSH_TRACK    = 0x26;
+static constexpr uint8_t CMD_REQ_SETTINGS  = 0x30;
+static constexpr uint8_t CMD_SETTINGS_DUMP = 0x31;
+static constexpr uint8_t CMD_SET_SETTINGS  = 0x32;
 
 static constexpr uint8_t ACK_OK           = 0;
 static constexpr uint8_t ACK_BAD_CHECKSUM = 1;
@@ -114,6 +118,17 @@ void midi_send_step_position(uint8_t pat) {
 
 static void send_active_pattern(uint8_t pat) {
   const uint8_t msg[5] = { 0xF0, SYX_MFR, CMD_ACTIVE_PAT, (uint8_t)(pat & 0x1F), 0xF7 };
+  midi_tx_msg(msg, sizeof(msg));
+}
+
+// Settings dump (0x31): the three global config values, one 7-bit byte each.
+static bool settings_save_pending = false;   // a 0x32 set awaiting a flash write
+
+void midi_send_settings() {
+  const uint8_t msg[7] = { 0xF0, SYX_MFR, CMD_SETTINGS_DUMP,
+                           (uint8_t)(g_settings.midi_channel & 0x7F),
+                           (uint8_t)(g_settings.clock_source & 0x7F),
+                           (uint8_t)(g_settings.out_mode     & 0x7F), 0xF7 };
   midi_tx_msg(msg, sizeof(msg));
 }
 
@@ -255,6 +270,21 @@ static void handle_sysex(Engine &eng, uint8_t &disp_group) {
         pending_trk_dumps |= (uint8_t)1 << rx_buf[2];
       break;
     case CMD_PUSH_TRACK: handle_push_track(eng); break;
+    case CMD_REQ_SETTINGS: midi_send_settings(); break;
+    case CMD_SET_SETTINGS:
+      // 7D 32 <channel> <clock_source> <out_mode>: apply to RAM now (audible
+      // immediately), flag for the deferred flash write, then echo the
+      // sanitized result back so the editor reflects any clamping.
+      if (rx_len >= 5) {
+        g_settings.midi_channel = rx_buf[2];
+        g_settings.clock_source = rx_buf[3];
+        g_settings.out_mode     = rx_buf[4];
+        g_settings.sanitize();
+        settings_save_pending = true;
+        send_ack(ACK_OK);
+        midi_send_settings();
+      }
+      break;
     default: break;   // unknown command: ignore
   }
 }
@@ -263,10 +293,19 @@ static void handle_sysex(Engine &eng, uint8_t &disp_group) {
 // MIDI-IN channel messages (any channel, running status supported)
 // ---------------------------------------------------------------------------
 // Note On matching the INSTRUMENT_NOTE map = one-shot drum trigger (web-editor
-// audition, pads, DAWs); velocity >= 100 also asserts the accent line.
-// Program Change 0-31 = select that pattern, exactly like a panel press.
-static uint8_t chan_status = 0;     // last Note On / Program Change status (0 = none)
-static uint8_t chan_d1     = 0xFF;  // pending first data byte (0xFF = none)
+// audition, pads, DAWs); velocity >= 100 also asserts the accent line. Program
+// Change selects a pattern (sub*16 + pc), with Bank Select LSB (CC 32) choosing
+// the sub = pattern group. Settings.midi_channel gates which channel acts.
+static uint8_t chan_status   = 0;     // last Note On / PC / CC status (0 = none)
+static uint8_t chan_d1       = 0xFF;  // pending note-on data byte (0xFF = none)
+static uint8_t chan_cc_num   = 0xFF;  // pending CC controller number (0xFF = none)
+static uint8_t midi_bank_lsb = 0;     // Bank Select LSB (CC 32) = sub / group
+
+// Does this channel-message status pass the configured receive filter?
+static inline bool chan_match(uint8_t status) {
+  if (g_settings.midi_channel == 0) return true;                  // omni
+  return (status & 0x0F) == (uint8_t)(g_settings.midi_channel - 1);
+}
 
 // ---------------------------------------------------------------------------
 // MIDI-IN System Real-Time (external clock sync)
@@ -281,11 +320,18 @@ static bool    s_start_edge = false; // Start or Continue seen this poll
 static bool    s_stop_edge  = false; // Stop seen this poll
 
 static void rt_byte(uint8_t b) {
+  if (b == 0xF8) {                    // Clock: count it for the sequencer, and
+    if (s_clk_pulses < 250) ++s_clk_pulses;
+    // Forward the incoming clock to MIDI OUT when we're slaving to it (MIDI
+    // sync) so downstream gear chases the same clock — or, in THRU mode, as
+    // part of the raw soft-thru. Not when we're the internal/DIN master in OUT
+    // mode (then we generate our own clock in main.cpp instead).
+    if (g_settings.out_mode == OUT_MODE_THRU || g_settings.clock_source == CLK_SRC_MIDI)
+      Serial1.write(0xF8);
+    return;
+  }
+  if (g_settings.out_mode == OUT_MODE_THRU) Serial1.write(b);  // soft-thru other realtime
   switch (b) {
-    case 0xF8:                        // Clock: count it for the sequencer, and
-      if (s_clk_pulses < 250) ++s_clk_pulses;  // forward 1:1 to MIDI OUT so any
-      Serial1.write(0xF8);            // downstream gear chases the same clock
-      break;
     case 0xFA:                        // Start
     case 0xFB:                        // Continue (the 606 has no pause/resume, so
       s_transport  = true;            // this restarts the pattern, same as Start)
@@ -300,22 +346,42 @@ static void rt_byte(uint8_t b) {
 }
 
 static void chan_byte(Engine &eng, uint8_t &disp_group, uint8_t b) {
-  if (b & 0x80) {
+  if (b & 0x80) {                                    // new status byte
     const uint8_t type = b & 0xF0;
-    chan_status = (type == 0x90 || type == 0xC0) ? b : 0;
-    chan_d1 = 0xFF;
+    chan_status = (type == 0x90 || type == 0xC0 || type == 0xB0) ? b : 0;
+    chan_d1     = 0xFF;
+    chan_cc_num = 0xFF;
     return;
   }
   if (!chan_status) return;
-  if ((chan_status & 0xF0) == 0xC0) {                // program change: 1 data byte
-    if (b < NUM_PATTERNS) {
-      eng.SelectPattern(b);
-      disp_group = b / 16;
+  const uint8_t type = chan_status & 0xF0;
+
+  if (type == 0xC0) {                                // Program Change: 1 data byte
+    if (chan_match(chan_status)) {
+      const uint8_t idx = (uint8_t)(midi_bank_lsb * PATS_PER_GROUP + b);
+      if (idx < NUM_PATTERNS) {
+        eng.SelectPattern(idx);                      // sub*16 + pc, same as a panel press
+        disp_group = idx / PATS_PER_GROUP;
+      }
     }
     return;                                          // running status: next byte = next PC
   }
-  if (chan_d1 == 0xFF) { chan_d1 = b; return; }      // note on: collect note, then velocity
-  if (b > 0) {                                       // velocity 0 = note off
+
+  if (type == 0xB0) {                                // Control Change: controller, value
+    if (chan_cc_num == 0xFF) { chan_cc_num = b; return; }
+    const uint8_t cc = chan_cc_num;
+    chan_cc_num = 0xFF;                              // running status: next pair
+    // Bank Select sets the sub/group for the next Program Change. CC 0 (MSB) is
+    // the bank — the 606 has one, so it is accepted and ignored. CC 32 (LSB) is
+    // the sub = pattern group (0 = I, 1 = II), added as a ×16 offset.
+    if (cc == 32 && chan_match(chan_status))
+      midi_bank_lsb = (b < NUM_GROUPS) ? b : 0;
+    return;
+  }
+
+  // Note On (0x90): collect note, then velocity
+  if (chan_d1 == 0xFF) { chan_d1 = b; return; }
+  if (b > 0 && chan_match(chan_status)) {            // velocity 0 = note off
     for (uint8_t i = INST_BD; i < NUM_INSTRUMENTS; ++i)
       if (INSTRUMENT_NOTE[i] == chan_d1) { eng.TriggerNow((uint8_t)1 << i, b >= 100); break; }
   }
@@ -331,13 +397,25 @@ static void rx_byte(Engine &eng, uint8_t &disp_group, uint8_t b) {
     chan_status = 0;                      // a system message cancels running status
     return;
   }
-  if (!rx_active) { chan_byte(eng, disp_group, b); return; }
+  // THRU: soft-thru channel + realtime performance data, but not the editor's
+  // SysEx (it stays local). A channel byte arrives either outside a SysEx
+  // capture, or as the status byte that aborts one.
+  if (!rx_active) {
+    if (g_settings.out_mode == OUT_MODE_THRU) Serial1.write(b);
+    chan_byte(eng, disp_group, b);
+    return;
+  }
   if (b == 0xF7) {
     rx_active = false;
     if (!rx_overflow) handle_sysex(eng, disp_group);
     return;
   }
-  if (b & 0x80) { rx_active = false; chan_byte(eng, disp_group, b); return; }  // status aborts the SysEx
+  if (b & 0x80) {                      // status aborts the SysEx
+    rx_active = false;
+    if (g_settings.out_mode == OUT_MODE_THRU) Serial1.write(b);
+    chan_byte(eng, disp_group, b);
+    return;
+  }
   if (rx_len < sizeof(rx_buf)) rx_buf[rx_len++] = b;
   else rx_overflow = true;                // too long for us: swallow and discard
 }
@@ -388,5 +466,11 @@ bool midi_take_save_request(const Engine &eng) {
   if (txq_count > 0 || pending_pat_dumps || pending_trk_dumps) return false;
   if ((uint32_t)(millis() - last_rx_ms) < 250) return false;   // mid-transfer: wait
   save_pending = false;
+  return true;
+}
+
+bool midi_take_settings_save(const Engine &eng) {
+  if (!settings_save_pending || eng.running) return false;     // values are already live in RAM
+  settings_save_pending = false;
   return true;
 }

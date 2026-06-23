@@ -16,6 +16,8 @@
 
 static constexpr uint8_t MAX_STEPS      = 16;
 static constexpr uint8_t NUM_PATTERNS   = 32;   // group I = 0..15, group II = 16..31
+static constexpr uint8_t PATS_PER_GROUP = 16;   // patterns per group (PATTERN GROUP I/II)
+static constexpr uint8_t NUM_GROUPS     = NUM_PATTERNS / PATS_PER_GROUP;  // 2
 static constexpr uint8_t NUM_TRACKS     = 8;    // selected with the INSTRUMENT dial
 static constexpr uint8_t TRACK_MAX_PATS = 64;
 

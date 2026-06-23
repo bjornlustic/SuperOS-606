@@ -449,6 +449,39 @@
     </div>
   </div>
 
+  <!-- MIDI settings (device globals stored on the 606) -->
+  <div class="strip">
+    <div class="group">
+      <span class="lbl">MIDI Channel</span>
+      <div class="group-inner"><select id="setChannel" disabled title="Channel the 606 listens on for notes + program change (Omni = all)"></select></div>
+    </div>
+    <div class="group">
+      <span class="lbl">Clock Sync</span>
+      <div class="group-inner"><select id="setClock" disabled title="MIDI sync = slave to an incoming MIDI clock; Internal / DIN = run from the TEMPO knob / rear DIN-sync jack">
+        <option value="0">MIDI sync</option>
+        <option value="1">Internal / DIN</option>
+      </select></div>
+    </div>
+    <div class="group">
+      <span class="lbl">MIDI Out</span>
+      <div class="group-inner"><select id="setOut" disabled title="Out = the 606's own notes/clock; Thru = pass MIDI IN straight through, muting the 606's own output">
+        <option value="0">Out</option>
+        <option value="1">Thru</option>
+      </select></div>
+    </div>
+    <div class="group">
+      <span class="lbl">Program Change test</span>
+      <div class="group-inner" style="gap:6px;flex-wrap:wrap">
+        <select id="pcSub" disabled title="Bank Select LSB (sub) = pattern group">
+          <option value="0">Group I</option>
+          <option value="1">Group II</option>
+        </select>
+        <select id="pcProg" disabled title="Program = pattern number"></select>
+        <button class="btn" id="btnPcSend" disabled title="Send Bank Select + Program Change so the 606 selects this pattern">Send PC</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Device transfer + JSON -->
   <div class="strip">
     <div class="group">
@@ -663,16 +696,22 @@
   //     F0 7D 1D <pat 0-31> F7                                select pattern
   //     F0 7D 24 <trk 0-7> F7                                 request track
   //     F0 7D 26 <trk> <xor_lo> <xor_hi> <75B packed> F7      push track
+  //     F0 7D 30 F7                                           request settings
+  //     F0 7D 32 <chan 0-16> <clk 0-1> <out 0-1> F7           set settings
   //   606 -> editor
   //     F0 7D 11 <pat> <xor_lo> <xor_hi> <21B packed> F7      pattern dump
   //     F0 7D 14 <status> F7                                  push ack
   //     F0 7D 15 <pat 0-31> F7                                pattern-start anchor (running)
   //     F0 7D 1E <pat 0-31> F7                                selected pattern (stopped / on stop)
   //     F0 7D 25 <trk> <xor_lo> <xor_hi> <75B packed> F7      track dump
+  //     F0 7D 31 <chan 0-16> <clk 0-1> <out 0-1> F7           settings dump
   //
-  // Selections behave like panel presses: immediate when the 606 is stopped,
-  // queued at the next pattern wrap when running. Note Ons matching the drum
-  // map fire that voice on the 606 (one-shot trigger; vel >= 100 = accent).
+  // Settings (globals stored on the 606): chan 0 = omni / 1-16; clk 0 = MIDI
+  // sync / 1 = internal-DIN; out 0 = MIDI OUT / 1 = THRU. Selections behave like
+  // panel presses: immediate when the 606 is stopped, queued at the next pattern
+  // wrap when running. Note Ons matching the drum map fire that voice on the 606
+  // (one-shot trigger; vel >= 100 = accent). Program Change (with Bank Select
+  // LSB = sub/group) selects a pattern: absolute index = sub*16 + program.
   var SYX_MFR           = 0x7d;
   var CMD_REQ_PATTERN   = 0x10;
   var CMD_PATTERN_DUMP  = 0x11;
@@ -688,6 +727,9 @@
   var CMD_REQ_TRACK     = 0x24;
   var CMD_TRACK_DUMP    = 0x25;
   var CMD_PUSH_TRACK    = 0x26;
+  var CMD_REQ_SETTINGS  = 0x30;   // editor -> 606: request global settings
+  var CMD_SETTINGS_DUMP = 0x31;   // 606 -> editor: channel, clock source, out mode
+  var CMD_SET_SETTINGS  = 0x32;   // editor -> 606: apply + persist global settings
   var ACK_NAMES = ['ok', 'bad_checksum', 'bad_index', 'bad_length'];
 
   var LS_KEY       = 'superos606_data_v1';
@@ -1047,6 +1089,75 @@
     log('Chain ' + absChain.map(absPatLabel).join(' → ') + (clkRunning ? ' (at next wrap)' : ''), 'log-edit');
   }
 
+  // ── Device settings (MIDI channel / clock source / OUT-THRU) ───────────
+  // The three selects mirror the 606's global settings: requested on connect,
+  // pushed (and persisted on the 606) whenever the user changes one. settingsRx
+  // suppresses the change-handler while we apply an incoming dump, so reflecting
+  // the device's values never bounces a 0x32 straight back.
+  var settingsRx = false;
+
+  function initSettingsUI() {
+    var ch = document.getElementById('setChannel');
+    var omni = document.createElement('option');
+    omni.value = '0'; omni.textContent = 'Omni'; ch.appendChild(omni);
+    for (var c = 1; c <= 16; c++) {
+      var o = document.createElement('option');
+      o.value = String(c); o.textContent = 'Ch ' + c; ch.appendChild(o);
+    }
+    var prog = document.getElementById('pcProg');
+    for (var p = 1; p <= PATS_PER_GROUP; p++) {
+      var po = document.createElement('option');
+      po.value = String(p); po.textContent = 'P' + p; prog.appendChild(po);
+    }
+  }
+
+  function requestSettings() {
+    if (!midiOut) return;
+    sendSysex(new Uint8Array([SYX_MFR, CMD_REQ_SETTINGS]));
+  }
+
+  function sendSettings() {
+    if (!midiOut || settingsRx) return;
+    var chan = +document.getElementById('setChannel').value;
+    var clk  = +document.getElementById('setClock').value;
+    var out  = +document.getElementById('setOut').value;
+    sendSysex(new Uint8Array([SYX_MFR, CMD_SET_SETTINGS, chan & 0x7f, clk & 0x7f, out & 0x7f]));
+    log('Settings → channel ' + (chan === 0 ? 'Omni' : chan) +
+        ', clock ' + (clk ? 'Internal/DIN' : 'MIDI sync') +
+        ', out ' + (out ? 'Thru' : 'Out'), 'log-edit');
+  }
+
+  function applySettingsDump(chan, clk, out) {
+    settingsRx = true;
+    document.getElementById('setChannel').value = String(chan);
+    document.getElementById('setClock').value   = String(clk);
+    document.getElementById('setOut').value     = String(out);
+    settingsRx = false;
+    log('606 settings: channel ' + (chan === 0 ? 'Omni' : chan) +
+        ', clock ' + (clk ? 'Internal/DIN' : 'MIDI sync') +
+        ', out ' + (out ? 'Thru' : 'Out'), 'log-syx');
+  }
+
+  // Wire (0-based) channel the 606 listens on; Omni → channel 1 for the tester.
+  function currentWireChannel() {
+    var chan = +document.getElementById('setChannel').value;
+    return chan === 0 ? 0 : (chan - 1) & 0x0f;
+  }
+
+  // Program Change tester: Bank Select (sub = group) + Program Change, on raw
+  // channel messages — exactly what a DAW would send to pick a pattern.
+  function sendProgramChange() {
+    if (!midiOut) return;
+    var ch = currentWireChannel();
+    var sub = +document.getElementById('pcSub').value;     // 0 = group I, 1 = group II
+    var prog = +document.getElementById('pcProg').value;   // 1..16
+    midiOut.send([0xb0 | ch, 0x00, 0x00]);                 // Bank Select MSB = bank 1
+    midiOut.send([0xb0 | ch, 0x20, sub & 0x7f]);           // Bank Select LSB = sub / group
+    midiOut.send([0xc0 | ch, (prog - 1) & 0x7f]);          // Program Change = pattern
+    log('Program Change → ' + GROUP_NAMES[sub] + ' P' + prog +
+        ' (ch ' + (ch + 1) + ')', 'log-note');
+  }
+
   // View-only, like the panel's PATTERN GROUP button: shows the other group's
   // pills without moving the selection or touching the grid's pattern.
   function switchGroup(g) {
@@ -1091,7 +1202,8 @@
 
   function updateButtons() {
     var ok = !!midiOut && !!midiIn;
-    ['btnReq','btnReqAll','btnSendPat','btnSendGroup','btnSendAll','btnTrkSend','btnTrkReq'].forEach(function(id) {
+    ['btnReq','btnReqAll','btnSendPat','btnSendGroup','btnSendAll','btnTrkSend','btnTrkReq',
+     'setChannel','setClock','setOut','pcSub','pcProg','btnPcSend'].forEach(function(id) {
       document.getElementById(id).disabled = !ok;
     });
     document.getElementById('btnUndo').disabled  = !canUndo(editGroup, activePat);
@@ -1881,6 +1993,11 @@
       return;
     }
 
+    if (cmd === CMD_SETTINGS_DUMP && bytes.length >= 5) {
+      applySettingsDump(bytes[2], bytes[3], bytes[4]);
+      return;
+    }
+
     if (cmd === CMD_ACK && bytes.length >= 3) {
       var st = bytes[2];
       log('ACK: ' + (ACK_NAMES[st] || 'status=' + st), st === 0 ? 'log-ack' : 'log-err');
@@ -2151,7 +2268,10 @@
       if (!autoSyncDone) {
         autoSyncDone = true;
         log('Connected — auto-syncing patterns + tracks from the 606', 'log-syx');
-        setTimeout(function() { if (midiOut && midiIn && !syncQueue.length) startFullSync(); }, 400);
+        setTimeout(function() {
+          if (midiOut && midiIn && !syncQueue.length) startFullSync();
+          requestSettings();   // pull the 606's MIDI channel / clock / out-thru
+        }, 400);
       }
     } else if (midiOut && !midiIn) {
       statusEl.textContent = midiOut.name + ' — select input'; statusEl.className = 'is-warn';
@@ -2183,6 +2303,10 @@
   document.getElementById('btnMidi').addEventListener('click', connectMidi);
   document.getElementById('selOut').addEventListener('change', function() { if (midiAccess) bindPorts(midiAccess); });
   document.getElementById('selIn').addEventListener('change',  function() { if (midiAccess) bindPorts(midiAccess); });
+  document.getElementById('setChannel').addEventListener('change', sendSettings);
+  document.getElementById('setClock').addEventListener('change', sendSettings);
+  document.getElementById('setOut').addEventListener('change', sendSettings);
+  document.getElementById('btnPcSend').addEventListener('click', sendProgramChange);
 
   // Connect (and so auto-sync) without a click when the browser already
   // granted MIDI access on a previous visit — plugging in and opening the
@@ -2197,6 +2321,7 @@
   }
 
   // ── Init ───────────────────────────────────────────────────────────
+  initSettingsUI();
   syncToolbar();
   refreshAllPills();
   renderGrid();

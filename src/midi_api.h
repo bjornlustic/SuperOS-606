@@ -16,6 +16,8 @@
 //     F0 7D 1D <pat 0-31> F7                              select pattern
 //     F0 7D 24 <trk 0-7> F7                               request track
 //     F0 7D 26 <trk> <xor_lo> <xor_hi> <75B packed> F7    push track
+//     F0 7D 30 F7                                         request settings
+//     F0 7D 32 <chan 0-16> <clk 0-1> <out 0-1> F7         set settings
 //   606 -> editor
 //     F0 7D 11 <pat> <xor_lo> <xor_hi> <21B packed> F7    pattern dump
 //     F0 7D 14 <status> F7                                push ack (0 = ok)
@@ -25,25 +27,44 @@
 //     F0 7D 19 <pat> <scale 0-3> F7                       panel scale set
 //     F0 7D 1E <pat 0-31> F7                              selected pattern (stopped / on stop)
 //     F0 7D 25 <trk> <xor_lo> <xor_hi> <75B packed> F7    track dump
+//     F0 7D 31 <chan 0-16> <clk 0-1> <out 0-1> F7         settings dump
 //
 // Selections (0x1D / 0x1A) behave exactly like panel presses in PATTERN PLAY:
 // immediate when stopped; while running they queue and take over when the
 // playing pattern — or the whole active chain — finishes. The displayed
 // pattern group follows the selection so the step LEDs show it.
 //
-// MIDI-IN Note Ons (any channel) whose note matches the INSTRUMENT_NOTE map
-// fire that drum voice with a one-shot trigger pulse — this is how the web
-// editor auditions steps, and it makes the 606 playable from a DAW or pads.
-// Velocity >= 100 asserts the accent line for the hit. MIDI Program Change
-// 0-31 (any channel) selects that pattern, same semantics as 0x1D.
+// MIDI-IN Note Ons whose note matches the INSTRUMENT_NOTE map fire that drum
+// voice with a one-shot trigger pulse — this is how the web editor auditions
+// steps, and it makes the 606 playable from a DAW or pads. Velocity >= 100
+// asserts the accent line for the hit.
 //
-// MIDI sync (external clock IN): System Real-Time messages slave the sequencer
-// to an external MIDI clock. While clock (0xF8) is arriving the sequencer steps
-// off it at 24 PPQN instead of the 606's own tempo oscillator, and Start/Stop/
-// Continue (0xFA/0xFC/0xFB) run and stop it; it falls back to the internal
-// TEMPO-knob / DIN clock once the external clock stops. Auto-detected — any
-// incoming clock takes over (there is no spare panel control to gate it). The
-// received clock is forwarded 1:1 to MIDI OUT so downstream gear stays in sync.
+// Pattern selection by MIDI Program Change (Settings.midi_channel gates which
+// channel, default omni): Bank Select picks the bank/sub, the Program Change
+// picks the pattern within it, then the 606 selects exactly like a panel press.
+//   CC 0  (Bank Select MSB) = bank  — the 606 has one bank; accepted + ignored,
+//                                     kept for DAW compatibility / future banks.
+//   CC 32 (Bank Select LSB) = sub   — 0 = pattern group I, 1 = group II.
+//   Program Change          = pattern, mapped to absolute index sub*16 + pc.
+// With the default sub (0) a plain Program Change 0-31 still addresses all 32
+// patterns directly, so older "PC = absolute pattern" use keeps working.
+//
+// MIDI channel (Settings.midi_channel): 0 = omni, 1..16 = that channel only;
+// gates Note On, Program Change and Bank Select. SysEx is channel-less.
+//
+// MIDI sync (Settings.clock_source): in MIDI mode the System Real-Time messages
+// slave the sequencer to an external MIDI clock — while clock (0xF8) is arriving
+// it steps off it at 24 PPQN instead of the 606's own tempo oscillator, and
+// Start/Stop/Continue (0xFA/0xFC/0xFB) run and stop it, falling back to the
+// internal TEMPO-knob / DIN clock once the external clock stops; the received
+// clock is forwarded to MIDI OUT. In INTERNAL mode the MIDI clock + transport
+// are ignored and the 606 always runs from its TEMPO knob / rear DIN-sync jack,
+// clocking MIDI OUT as the master.
+//
+// MIDI out mode (Settings.out_mode): OUT = MIDI OUT carries the 606's own play
+// (a note per drum hit, transport, clock when master) plus the editor SysEx;
+// THRU = MIDI OUT mirrors MIDI IN performance data (channel + realtime) as a
+// soft thru and the 606's own note/clock/transport output is muted.
 //
 // Pushed patterns/tracks land in RAM immediately (audible on the next step)
 // and are flagged dirty; flash persistence happens through the normal
@@ -108,3 +129,14 @@ void midi_send_pattern_dump(uint8_t pat);
 /// TX queue is empty. The caller must then call save_dirty(eng) — the request
 /// is cleared by this call.
 bool midi_take_save_request(const Engine &eng);
+
+/// Queue a settings dump (SysEx 0x31) toward the editor — sent on a 0x30
+/// request and echoed after a 0x32 set so the editor always shows the applied
+/// (sanitized) values. Reads the global g_settings.
+void midi_send_settings();
+
+/// True exactly once when a settings change pushed over SysEx (0x32) is ready
+/// to persist (the sequencer is stopped). The new values are already live in
+/// g_settings; the caller then calls save_settings(g_settings) for the flash
+/// write. The request is cleared by this call.
+bool midi_take_settings_save(const Engine &eng);

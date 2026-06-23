@@ -33,13 +33,15 @@
 // follows the TEMPO knob (or DIN sync, via the rear switch). MIDI OUT mirrors
 // everything: clock/start/stop plus a note per drum hit.
 //
-// MIDI SYNC IN: when an external MIDI clock is arriving the sequencer slaves to
-// it instead — stepping off the incoming 24 PPQN clock and running/stopping on
-// MIDI Start/Stop/Continue — and falls back to the internal clock when it goes
-// away. The panel START/STOP and a DAW's transport are OR'd, so either can run
-// it; the received clock is forwarded to MIDI OUT for downstream gear. It is
-// auto-engaged (no spare panel control): any incoming clock takes over, so
-// unplug MIDI to play to the TEMPO knob / DIN sync again.
+// MIDI SYNC IN: in the MIDI clock-source mode (Settings.clock_source, set from
+// the web editor) an arriving external MIDI clock slaves the sequencer — it
+// steps off the incoming 24 PPQN clock, runs/stops on MIDI Start/Stop/Continue,
+// and falls back to the internal clock when it goes away; the panel START/STOP
+// and a DAW's transport are OR'd, so either can run it, and the received clock
+// is forwarded to MIDI OUT for downstream gear. In the INTERNAL/DIN mode the
+// MIDI clock + transport are ignored and the 606 always runs from its TEMPO
+// knob / rear DIN-sync jack. The MIDI receive channel and a MIDI-OUT/THRU choice
+// are settings too (see settings.h / midi_api.h).
 //
 // Patterns and tracks persist to internal flash (see flash_persist.h) when the
 // sequencer stops — if the SPM flash service is installed (service-install.syx).
@@ -56,6 +58,11 @@
 #include "engine.h"
 #include "flash_persist.h"
 #include "midi_api.h"
+#include "settings.h"
+
+// Global device settings (MIDI channel, clock source, OUT/THRU). Defined here,
+// read from midi.cpp; loaded from flash at boot, edited live over SysEx.
+Settings g_settings;
 
 // ---------------------------------------------------------------------------
 // MIDI out
@@ -63,9 +70,14 @@
 // Notes go through midi.cpp's TX queue so they can never split a SysEx pattern
 // dump in two. Realtime bytes write directly: the MIDI spec lets them
 // interleave anywhere, and clock must not wait behind a queued dump.
-static inline void midiNoteOn(uint8_t n, uint8_t v) { const uint8_t m[3] = { 0x90, (uint8_t)(n & 0x7F), (uint8_t)(v & 0x7F) }; midi_tx_msg(m, 3); }
-static inline void midiNoteOff(uint8_t n)           { const uint8_t m[3] = { 0x80, (uint8_t)(n & 0x7F), 0 }; midi_tx_msg(m, 3); }
-static inline void midiRT(uint8_t b)                { Serial1.write(b); }
+//
+// In THRU mode the 606's own performance output is muted — MIDI OUT instead
+// mirrors MIDI IN (handled in midi.cpp) — so the note + realtime senders below
+// are gated on OUT mode. The editor SysEx link (midi_tx_service) is unaffected.
+static inline bool midi_out_live() { return g_settings.out_mode == OUT_MODE_OUT; }
+static inline void midiNoteOn(uint8_t n, uint8_t v) { if (!midi_out_live()) return; const uint8_t m[3] = { 0x90, (uint8_t)(n & 0x7F), (uint8_t)(v & 0x7F) }; midi_tx_msg(m, 3); }
+static inline void midiNoteOff(uint8_t n)           { if (!midi_out_live()) return; const uint8_t m[3] = { 0x80, (uint8_t)(n & 0x7F), 0 }; midi_tx_msg(m, 3); }
+static inline void midiRT(uint8_t b)                { if (!midi_out_live()) return; Serial1.write(b); }
 
 // ---------------------------------------------------------------------------
 // Debounced inputs (3-sample shift register, sampled once per ~1 ms loop pass)
@@ -231,7 +243,8 @@ void setup() {
   eng.Init();
 
   flash_persist_begin();
-  load_all(eng);   // patterns + tracks only; power-on is always pattern 1, group I
+  load_all(eng);          // patterns + tracks only; power-on is always pattern 1, group I
+  load_settings(g_settings);   // MIDI channel / clock source / OUT-THRU (defaults if blank)
 
   // pin-change interrupt on the PA3 status input (tempo-clock pulse catcher)
   PCMSK0 |= _BV(PCINT3);
@@ -431,6 +444,12 @@ void loop() {
   // too (remote selections move disp_group, which sections 6/8 then display).
   MidiClockIn mc;
   midi_rx_poll(eng, disp_group, mc);
+  // In INTERNAL/DIN clock mode the MIDI clock + transport are ignored entirely:
+  // the 606 always runs from its own TEMPO knob / rear DIN-sync jack. (SysEx,
+  // notes and program change in midi_rx_poll are unaffected.)
+  if (g_settings.clock_source != CLK_SRC_MIDI) {
+    mc.pulses = 0; mc.transport = false; mc.started = false; mc.stopped = false;
+  }
   if (mc.pulses) s_last_mclk_ms = millis();
   // uint32_t (not uint16_t) so a long gap with no clock can't alias back under
   // the window every ~65 s and briefly suppress the internal clock.
@@ -510,6 +529,7 @@ void loop() {
   // halts the CPU and would drop incoming MIDI bytes).
   midi_tx_service(eng);
   if (midi_take_save_request(eng)) save_dirty(eng);
+  if (midi_take_settings_save(eng)) save_settings(g_settings);   // editor changed a global
 
   // 8. PATTERN GROUP I/II indicator + next display frame (the stopped tempo
   // blink lives inside build_frame, on each mode's selected-pattern LED)
