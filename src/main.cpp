@@ -77,7 +77,12 @@ Settings g_settings;
 static inline bool midi_out_live() { return g_settings.out_mode == OUT_MODE_OUT; }
 static inline void midiNoteOn(uint8_t n, uint8_t v) { if (!midi_out_live()) return; const uint8_t m[3] = { 0x90, (uint8_t)(n & 0x7F), (uint8_t)(v & 0x7F) }; midi_tx_msg(m, 3); }
 static inline void midiNoteOff(uint8_t n)           { if (!midi_out_live()) return; const uint8_t m[3] = { 0x80, (uint8_t)(n & 0x7F), 0 }; midi_tx_msg(m, 3); }
-static inline void midiRT(uint8_t b)                { if (!midi_out_live()) return; Serial1.write(b); }
+// Realtime out (clock/start/stop). Non-blocking: if the UART FIFO is momentarily
+// full (e.g. a step firing a stack of voices), drop the byte rather than block —
+// a stalled loop would let the RX FIFO overflow and slip the sequencer off the
+// incoming clock. Downstream sync survives an occasional missed byte; the loop's
+// timing must not.
+static inline void midiRT(uint8_t b)                { if (!midi_out_live()) return; if (Serial1.availableForWrite() > 0) Serial1.write(b); }
 
 // ---------------------------------------------------------------------------
 // Debounced inputs (3-sample shift register, sampled once per ~1 ms loop pass)

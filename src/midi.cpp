@@ -94,8 +94,24 @@ bool midi_tx_msg(const uint8_t *msg, uint8_t len) {
   return true;
 }
 
+// Leave this many bytes free in the UART TX FIFO when pumping the queue, so the
+// realtime / soft-thru direct writes below always have room and never have to
+// BLOCK. A blocked write stalls the main loop, and a stalled loop lets the RX
+// FIFO overflow — dropping incoming MIDI-clock pulses, which slips the sequencer
+// behind the DAW. This was the "goes out of time once the hats are playing" bug:
+// the extra Note On/Off traffic kept the TX FIFO full, so each clock-forward
+// blocked. Realtime bytes are 1 byte each and only a few land per poll, so this
+// headroom is plenty.
+static constexpr uint8_t TX_RT_RESERVE = 8;
+
+// Write one MIDI-OUT byte only if the UART has room; never block the loop. Used
+// for realtime + soft-thru, where a dropped byte is far cheaper than a stall.
+static inline void tx_raw(uint8_t b) {
+  if (Serial1.availableForWrite() > 0) Serial1.write(b);
+}
+
 static void tx_pump() {
-  int room = Serial1.availableForWrite();
+  int room = (int)Serial1.availableForWrite() - TX_RT_RESERVE;
   while (txq_count > 0 && room-- > 0) {
     Serial1.write(txq[txq_head]);
     txq_head = (uint8_t)((txq_head + 1) % sizeof(txq));
@@ -327,15 +343,20 @@ static void rt_byte(uint8_t b) {
     // part of the raw soft-thru. Not when we're the internal/DIN master in OUT
     // mode (then we generate our own clock in main.cpp instead).
     if (g_settings.out_mode == OUT_MODE_THRU || g_settings.clock_source == CLK_SRC_MIDI)
-      Serial1.write(0xF8);
+      tx_raw(0xF8);                   // non-blocking: forwarding must never stall
+                                      // the loop and starve RX of the next clock
     return;
   }
-  if (g_settings.out_mode == OUT_MODE_THRU) Serial1.write(b);  // soft-thru other realtime
+  if (g_settings.out_mode == OUT_MODE_THRU) tx_raw(b);         // soft-thru other realtime
   switch (b) {
     case 0xFA:                        // Start
     case 0xFB:                        // Continue (the 606 has no pause/resume, so
       s_transport  = true;            // this restarts the pattern, same as Start)
       s_start_edge = true;
+      s_clk_pulses = 0;               // the downbeat must fire on the first clock
+                                      // AFTER Start — drop any clock bytes that
+                                      // arrived earlier in this same poll, or the
+                                      // first step lands up to a tick early
       break;
     case 0xFC:                        // Stop
       s_transport = false;
@@ -360,9 +381,9 @@ static void chan_byte(Engine &eng, uint8_t &disp_group, uint8_t b) {
     if (chan_match(chan_status)) {
       const uint8_t idx = (uint8_t)(midi_bank_lsb * PATS_PER_GROUP + b);
       if (idx < NUM_PATTERNS) {
-        eng.SelectPattern(idx);                      // sub*16 + pc, same as a panel press
-        disp_group = idx / PATS_PER_GROUP;
-      }
+        eng.SelectPatternSynced(idx);                // sub*16 + pc; lands on the
+        disp_group = idx / PATS_PER_GROUP;           // bar even if it arrives a
+      }                                              // hair after the bar's tick
     }
     return;                                          // running status: next byte = next PC
   }
@@ -401,7 +422,7 @@ static void rx_byte(Engine &eng, uint8_t &disp_group, uint8_t b) {
   // SysEx (it stays local). A channel byte arrives either outside a SysEx
   // capture, or as the status byte that aborts one.
   if (!rx_active) {
-    if (g_settings.out_mode == OUT_MODE_THRU) Serial1.write(b);
+    if (g_settings.out_mode == OUT_MODE_THRU) tx_raw(b);
     chan_byte(eng, disp_group, b);
     return;
   }
@@ -412,7 +433,7 @@ static void rx_byte(Engine &eng, uint8_t &disp_group, uint8_t b) {
   }
   if (b & 0x80) {                      // status aborts the SysEx
     rx_active = false;
-    if (g_settings.out_mode == OUT_MODE_THRU) Serial1.write(b);
+    if (g_settings.out_mode == OUT_MODE_THRU) tx_raw(b);
     chan_byte(eng, disp_group, b);
     return;
   }

@@ -220,6 +220,25 @@ class Engine {
       queue_len = 1;
     }
   }
+  // DAW program-change select. Behaves exactly like SelectPattern (immediate
+  // when stopped, queued for the next wrap while running) EXCEPT when we are
+  // still on the first step of the current pattern: then it switches NOW. A DAW
+  // puts a program change on a bar line, but its bytes can reach us a loop pass
+  // or two after that bar's own clock tick already wrapped the sequencer — so a
+  // plain queue would miss the bar it was meant for and wait a whole pattern.
+  // Snapping while step == 0 lands it on that bar. Panel / web-editor selects
+  // never call this; they always wait for the wrap (unchanged feel on the box).
+  void SelectPatternSynced(uint8_t p) {
+    if (running && step == 0) {
+      cur_pat   = p;
+      chain_len = 0;
+      chain_pos = 0;
+      queue_len = 0;
+      latch_scale();
+    } else {
+      SelectPattern(p);
+    }
+  }
   // Select a range chain [first..last] (absolute indices, same group).
   void SelectChain(const uint8_t *pats, uint8_t n) {
     if (n > CHAIN_MAX) n = CHAIN_MAX;

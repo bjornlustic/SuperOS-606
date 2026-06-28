@@ -61,7 +61,14 @@ inline void ScanMatrix(uint8_t cell[4], uint8_t *status) {
 // shown at ~25% duty. This is the main loop's heartbeat: calling it
 // continuously keeps the LEDs lit and the switches sampled at ~1 kHz.
 inline void ScanAndDisplay(uint16_t frame, uint8_t cell[4], uint8_t *status,
-                           uint16_t col_us = 150) {
+                           uint16_t col_us = 25) {  // was 150: short dwell = fast loop
+                                                    // = the gated tempo-clock (PA3)
+                                                    // is sampled ~5x more often, like
+                                                    // the OS-303 / the original scan,
+                                                    // so a COMMON-TRIG disturbance from
+                                                    // multiple voices can't drop a tick.
+                                                    // Cost: dimmer LEDs (timer-ISR port
+                                                    // restores them — the proper fix).
   PORTF = 0x0F;                       // all selects high -> status group valid
   delayMicroseconds(3);
   uint8_t st = 0;
