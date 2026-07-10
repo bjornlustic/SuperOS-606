@@ -31,6 +31,15 @@ static constexpr uint8_t CMD_PUSH_TRACK    = 0x26;
 static constexpr uint8_t CMD_REQ_SETTINGS  = 0x30;
 static constexpr uint8_t CMD_SETTINGS_DUMP = 0x31;
 static constexpr uint8_t CMD_SET_SETTINGS  = 0x32;
+static constexpr uint8_t CMD_SET_FIRMWARE  = 0x4D;   // combined builds: 7D 4D <fw>
+
+// Set by CMD_SET_FIRMWARE; consumed by midi_take_fw_switch(). -1 = none.
+static int8_t fw_switch_request = -1;
+int8_t midi_take_fw_switch() {
+  const int8_t r = fw_switch_request;
+  fw_switch_request = -1;
+  return r;
+}
 
 static constexpr uint8_t ACK_OK           = 0;
 static constexpr uint8_t ACK_BAD_CHECKSUM = 1;
@@ -91,6 +100,15 @@ bool midi_tx_msg(const uint8_t *msg, uint8_t len) {
     txq_tail = (uint8_t)((txq_tail + 1) % sizeof(txq));
   }
   txq_count += len;
+#ifdef SUPEROS_USB_MIDI
+  // Mirror the complete message over USB-C (same scheme as SuperOS-303's
+  // Phase-1 USB MIDI). All queued messages are complete units: SysEx dumps/
+  // ACKs for the editor, and the 3-byte drum notes from main.cpp. The USB
+  // core drops sends instantly when not enumerated, so this never blocks.
+  if (len >= 2 && msg[0] == 0xF0)      usbMIDI.sendSysEx(len, msg, true);
+  else if (len == 3 && msg[0] == 0x90) usbMIDI.sendNoteOn(msg[1], msg[2], 1);
+  else if (len == 3 && msg[0] == 0x80) usbMIDI.sendNoteOff(msg[1], msg[2], 1);
+#endif
   return true;
 }
 
@@ -108,6 +126,9 @@ static constexpr uint8_t TX_RT_RESERVE = 8;
 // for realtime + soft-thru, where a dropped byte is far cheaper than a stall.
 static inline void tx_raw(uint8_t b) {
   if (Serial1.availableForWrite() > 0) Serial1.write(b);
+#ifdef SUPEROS_USB_MIDI
+  if (b >= 0xF8) usbMIDI.sendRealTime(b);   // forwarded clock etc. -> USB too
+#endif
 }
 
 static void tx_pump() {
@@ -301,6 +322,11 @@ static void handle_sysex(Engine &eng, uint8_t &disp_group) {
         midi_send_settings();
       }
       break;
+    case CMD_SET_FIRMWARE:
+      // 7D 4D <fw>: request a reboot into the other firmware. main.cpp acts
+      // on it (combined builds only; it owns flash persistence + the switch).
+      if (rx_len >= 3) fw_switch_request = (int8_t)rx_buf[2];
+      break;
     default: break;   // unknown command: ignore
   }
 }
@@ -442,6 +468,55 @@ static void rx_byte(Engine &eng, uint8_t &disp_group, uint8_t b) {
 }
 
 // ---------------------------------------------------------------------------
+// USB MIDI in (SUPEROS_USB_MIDI builds): everything is re-serialized into the
+// same rx_byte() parser as the DIN stream, so USB input is functionally
+// identical — notes, program change, clock/transport, and the full editor
+// SysEx protocol (incl. the 0x4D firmware switch). SysEx arrives through the
+// core's 3-arg PARTIAL handler, chunked, so messages bigger than the core's
+// buffer (the 82-byte track push) work — same approach as SuperOS-303.
+// ---------------------------------------------------------------------------
+#ifdef SUPEROS_USB_MIDI
+static Engine  *s_usb_eng = nullptr;      // valid while midi_rx_poll runs (the
+static uint8_t *s_usb_grp = nullptr;      // handlers only fire inside read())
+static bool     s_usb_sx_open = false;
+
+static void usb_sysex_chunk(const uint8_t *d, uint16_t n, bool complete) {
+  if (!s_usb_eng) return;
+  if (n) {
+    // normalize framing: the chunks carry the wire bytes (F0...F7), but be
+    // tolerant of a core that strips them
+    if (!s_usb_sx_open && d[0] != 0xF0) rx_byte(*s_usb_eng, *s_usb_grp, 0xF0);
+    s_usb_sx_open = true;
+    for (uint16_t i = 0; i < n; ++i) {
+      const uint8_t b = d[i];
+      if (b == 0xF0 || b == 0xF7 || b < 0x80) rx_byte(*s_usb_eng, *s_usb_grp, b);
+    }
+    if (complete && d[n - 1] != 0xF7) rx_byte(*s_usb_eng, *s_usb_grp, 0xF7);
+  }
+  if (complete) s_usb_sx_open = false;
+}
+
+static void usb_rx_drain(Engine &eng, uint8_t &disp_group) {
+  static bool hooked = false;
+  if (!hooked) { hooked = true; usbMIDI.setHandleSystemExclusive(usb_sysex_chunk); }
+  s_usb_eng = &eng;
+  s_usb_grp = &disp_group;
+  while (usbMIDI.read()) {
+    const uint8_t t = usbMIDI.getType();
+    if (t >= 0xF8) { rx_byte(eng, disp_group, t); continue; }   // realtime
+    if (t == 0xF0) { last_rx_ms = millis(); continue; }         // via the chunk handler
+    if (t == 0x80 || t == 0x90 || t == 0xB0 || t == 0xC0) {
+      const uint8_t st = (uint8_t)(t | ((usbMIDI.getChannel() - 1) & 0x0F));
+      rx_byte(eng, disp_group, st);
+      rx_byte(eng, disp_group, usbMIDI.getData1());
+      if (t != 0xC0) rx_byte(eng, disp_group, usbMIDI.getData2());
+      last_rx_ms = millis();
+    }
+  }
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
 void midi_rx_poll(Engine &eng, uint8_t &disp_group, MidiClockIn &mc) {
@@ -455,6 +530,9 @@ void midi_rx_poll(Engine &eng, uint8_t &disp_group, MidiClockIn &mc) {
     if (b < 0xF8) last_rx_ms = millis();   // a streaming clock must NOT keep the
                                            // idle-save gate from ever opening
   }
+#ifdef SUPEROS_USB_MIDI
+  usb_rx_drain(eng, disp_group);
+#endif
 
   mc.pulses    = s_clk_pulses;
   mc.transport = s_transport;

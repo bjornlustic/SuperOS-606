@@ -130,6 +130,10 @@ void midi_send_pattern_dump(uint8_t pat);
 /// is cleared by this call.
 bool midi_take_save_request(const Engine &eng);
 
+/// Firmware-switch request from SysEx 0x4D (combined builds): returns the
+/// requested firmware id once, then -1. main.cpp flushes and reboots.
+int8_t midi_take_fw_switch();
+
 /// Queue a settings dump (SysEx 0x31) toward the editor — sent on a 0x30
 /// request and echoed after a 0x32 set so the editor always shows the applied
 /// (sanitized) values. Reads the global g_settings.

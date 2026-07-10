@@ -34,22 +34,44 @@ inline void LightCell(uint8_t sel, uint8_t led) {
 
 inline void AllOff() { PORTF = 0x0F; }
 
+// Matrix read schedule, CLOCK-INDEPENDENT. This replicates, explicitly, the
+// exact timing of the build that works on hardware: at 4 MHz the per-pin
+// digitalRead calls each took ~12 us, so after a select change the reads
+// landed at +3/+15/+27/+39 us (PB) and +51/+63/+75/+87 us (PA) — and the
+// matrix behaved. At 16 MHz the same code reads 4x earlier and the lines have
+// not settled (they decay through the 15 K pulldowns): pressed keys ghost
+// into every row (a step press landing on every 4th step), and the PA status
+// lines read phantom RUN/CLEAR/mode levels (sequencer auto-running at
+// power-on). Encoding the working schedule as explicit delays makes the scan
+// identical at any F_CPU. Do not shrink these without testing on hardware.
+static constexpr uint8_t SCAN_SETTLE_US   = 3;   // select change -> first read
+static constexpr uint8_t SCAN_READ_GAP_US = 12;  // spacing between pin reads
+
 // Read the whole switch matrix.
 //   cell[s] (s = select 0..3): bit0-3 = PB0-3, bit4-7 = PA0-3 while select s is LOW
 //   *status                  : bit0-3 = PA0-3 while ALL selects are HIGH
 inline void ScanMatrix(uint8_t cell[4], uint8_t *status) {
   PORTF = 0x0F;                       // all selects high
-  delayMicroseconds(3);
+  delayMicroseconds(SCAN_SETTLE_US);
   uint8_t st = 0;
-  for (uint8_t j = 0; j < 4; ++j) st |= (digitalRead(STATUS_PINS[j]) << j);
+  for (uint8_t j = 0; j < 4; ++j) {
+    st |= (digitalRead(STATUS_PINS[j]) << j);
+    delayMicroseconds(SCAN_READ_GAP_US);
+  }
   *status = st;
 
   for (uint8_t s = 0; s < 4; ++s) {
     PORTF = (uint8_t)(0x0F & ~(1 << s)); // pull select s LOW
-    delayMicroseconds(3);
+    delayMicroseconds(SCAN_SETTLE_US);
     uint8_t v = 0;
-    for (uint8_t j = 0; j < 4; ++j) v |= (digitalRead(SW_PINS[j]) << j);
-    for (uint8_t j = 0; j < 4; ++j) v |= (digitalRead(STATUS_PINS[j]) << (4 + j));
+    for (uint8_t j = 0; j < 4; ++j) {
+      v |= (digitalRead(SW_PINS[j]) << j);
+      delayMicroseconds(SCAN_READ_GAP_US);
+    }
+    for (uint8_t j = 0; j < 4; ++j) {
+      v |= (digitalRead(STATUS_PINS[j]) << (4 + j));
+      delayMicroseconds(SCAN_READ_GAP_US);
+    }
     cell[s] = v;
   }
   PORTF = 0x0F;
@@ -70,18 +92,27 @@ inline void ScanAndDisplay(uint16_t frame, uint8_t cell[4], uint8_t *status,
                                                     // Cost: dimmer LEDs (timer-ISR port
                                                     // restores them — the proper fix).
   PORTF = 0x0F;                       // all selects high -> status group valid
-  delayMicroseconds(3);
+  delayMicroseconds(SCAN_SETTLE_US);
   uint8_t st = 0;
-  for (uint8_t j = 0; j < 4; ++j) st |= (digitalRead(STATUS_PINS[j]) << j);
+  for (uint8_t j = 0; j < 4; ++j) {
+    st |= (digitalRead(STATUS_PINS[j]) << j);
+    delayMicroseconds(SCAN_READ_GAP_US);
+  }
   *status = st;
 
   for (uint8_t s = 0; s < 4; ++s) {
     const uint8_t leds = (uint8_t)((frame >> (4 * s)) & 0x0F);
     PORTF = (uint8_t)((0x0F & ~(1 << s)) | (leds << 4));  // select low + LED rows
-    delayMicroseconds(3);
+    delayMicroseconds(SCAN_SETTLE_US);
     uint8_t v = 0;
-    for (uint8_t j = 0; j < 4; ++j) v |= (digitalRead(SW_PINS[j]) << j);
-    for (uint8_t j = 0; j < 4; ++j) v |= (digitalRead(STATUS_PINS[j]) << (4 + j));
+    for (uint8_t j = 0; j < 4; ++j) {
+      v |= (digitalRead(SW_PINS[j]) << j);
+      delayMicroseconds(SCAN_READ_GAP_US);
+    }
+    for (uint8_t j = 0; j < 4; ++j) {
+      v |= (digitalRead(STATUS_PINS[j]) << (4 + j));
+      delayMicroseconds(SCAN_READ_GAP_US);
+    }
     cell[s] = v;
     delayMicroseconds(col_us);                            // LED dwell
   }

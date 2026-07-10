@@ -16,6 +16,26 @@
 
 static constexpr uint16_t TRIG_PULSE_US = 1500;
 
+// MIDI-IN drum hits are gathered before firing. A DAW sends the notes of one
+// "chord" as separate Note Ons, but the 606 has a SINGLE shared common-trigger
+// edge and a SINGLE shared accent bus per hit. Firing one pulse per note raced
+// the voices across pulse windows and let a later note pull the shared accent
+// down, so stacking voices accented unpredictably. Instead we accumulate the
+// incoming voices/accent and fire ONE pulse once no new note has arrived for
+// this long — every stacked voice then latches on the same edge with the same
+// accent, exactly like a sequencer step.
+//
+// The window must exceed the gap between two of a chord's notes as the main
+// loop SEES them: the RX FIFO is drained once per ~1ms pass, so a chord's notes
+// arrive roughly one per pass and the effective spacing is one loop period plus
+// jitter. 2ms was only ~2 passes of margin, so an occasional long pass split a
+// chord into two pulses with separate accents (the "accents on some hits only"
+// bug). 5ms rides out that jitter while staying far below the spacing of even
+// 64th notes (>20ms), so it never merges genuinely separate hits. The cost is a
+// fixed ~5ms trigger latency, which for DAW-timeline playback is just a constant
+// offset, not timing jitter. Raise it further if splits persist on hardware.
+static constexpr uint16_t TRIG_GATHER_US = 5000;
+
 // ACCENT is the fourth INSTRUMENT-DATA bit: AC = µPD650 PF3 = socket pin 19 =
 // Teensy 17 (= AC_PIN, see pins.h; service manual p.2). It is driven like the
 // seven voice bits — raised on accented steps, then pulsed by COMMON TRIG (PI2).
@@ -161,6 +181,17 @@ class Engine {
       pulse_on_ = false;
       SetGroupLed(group_led_);   // restore the I/II indicator level on PE0/PE1
     }
+    // Fire a gathered MIDI-IN hit once the chord has settled and the line is
+    // free, so all its voices latch on one common-trigger edge (see TriggerNow).
+    if (gather_active_ && !pulse_on_ &&
+        (uint16_t)(micros() - gather_last_) >= TRIG_GATHER_US) {
+      const uint8_t m = gather_mask_;
+      const bool    a = gather_accent_;
+      gather_mask_   = 0;
+      gather_accent_ = false;
+      gather_active_ = false;
+      fire_pulse(m, a);
+    }
   }
 
   // ---- editing (main.cpp calls these; they mark dirty bits) ----------------
@@ -194,14 +225,18 @@ class Engine {
   }
 
   // One-shot voice trigger from MIDI IN (web-editor audition / external pads /
-  // a DAW playing the drums): fires the given voices right now with a standard
-  // trigger pulse, leaving the sequencer state alone. Bit 0 is the accent
-  // track, not a voice, so it is masked off; `accent` asserts the AC line for
-  // this pulse only.
+  // a DAW playing the drums), leaving the sequencer state alone. Bit 0 is the
+  // accent track, not a voice, so it is masked off. Rather than firing now, the
+  // voice and its accent join the gather buffer; Service() fires one combined
+  // common-trigger pulse once the chord is complete (see TRIG_GATHER_US), so
+  // every stacked note latches on the same edge with one shared accent.
   void TriggerNow(uint8_t mask, bool accent) {
     mask &= 0xFE;
-    if (!mask && !accent) return;
-    fire_pulse(mask, accent);
+    if (!mask) return;
+    gather_mask_   |= mask;
+    gather_accent_ |= accent;       // any accented note accents the whole hit
+    gather_active_  = true;
+    gather_last_    = micros();
   }
 
   // ---- pattern selection / chains (PATTERN PLAY) ----------------------------
@@ -283,6 +318,12 @@ class Engine {
   uint8_t  active_scale_ = 0;
   bool     pulse_on_     = false;
   uint32_t pulse_t0_     = 0;
+  uint8_t  pulse_mask_   = 0;     // voices driven by the in-flight pulse (merged)
+  bool     pulse_accent_ = false; // accent for the in-flight pulse (OR of all voices)
+  uint8_t  gather_mask_   = 0;    // MIDI-IN voices accumulating for the next pulse
+  bool     gather_accent_ = false;// accent for the gathered hit (OR of its notes)
+  bool     gather_active_ = false;// a MIDI-IN hit is being gathered
+  uint32_t gather_last_   = 0;    // micros() of the most recent gathered note
   uint8_t  fired_        = 0;
   bool     fired_accent_ = false;
   uint8_t  group_led_    = 0;     // PATTERN GROUP I/II indicator level (PE0/PE1 idle)
@@ -349,12 +390,31 @@ class Engine {
   // LED, so non-firing voices must be forced LOW, not left alone), AC raised
   // only on accented hits, then the common-trigger pulse. Shared by the
   // sequencer (fire_step) and one-shot MIDI-IN triggers (TriggerNow).
+  //
+  // Accent is a SINGLE shared bus (the AC LEVEL bus, see top of file): it boosts
+  // every voice firing in the trigger window, so the box has one accent per hit,
+  // not one per voice. A DAW chord arrives as separate MIDI Note Ons ~0.7ms
+  // apart, landing inside one pulse window. If we restarted the pulse per note,
+  // an un-accented note arriving after an accented one would pull the shared
+  // accent line (and the earlier note's data line) back down — so the hit ended
+  // up un-accented or partly silenced depending on note order. Instead, merge
+  // into the live pulse: OR the new voice into the data lines and keep accent
+  // HIGH if ANY voice in the window is accented. Keep the original pulse_t0_ so
+  // a chord can't stretch the pulse — the merged voices land microseconds in,
+  // with the full ~1.5ms window still ahead of them.
   void fire_pulse(uint8_t mask, bool accent) {
+    if (pulse_on_) {
+      pulse_mask_   |= mask;
+      pulse_accent_ |= accent;
+    } else {
+      pulse_mask_   = mask;
+      pulse_accent_ = accent;
+      pulse_t0_     = micros();
+      pulse_on_     = true;
+    }
     for (uint8_t i = INST_BD; i < NUM_INSTRUMENTS; ++i)
-      digitalWrite(INSTRUMENT_PIN[i], (mask & (1 << i)) ? HIGH : LOW);
-    digitalWrite(AC_PIN, accent ? HIGH : LOW);
+      digitalWrite(INSTRUMENT_PIN[i], (pulse_mask_ & (1 << i)) ? HIGH : LOW);
+    digitalWrite(AC_PIN, pulse_accent_ ? HIGH : LOW);
     digitalWrite(PI2_PIN, HIGH);
-    pulse_t0_ = micros();
-    pulse_on_ = true;
   }
 };

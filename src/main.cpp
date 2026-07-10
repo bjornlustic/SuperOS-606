@@ -58,6 +58,15 @@
 #include "engine.h"
 #include "flash_persist.h"
 #include "midi_api.h"
+
+// Combined build (SUPEROS_COMBINED): combined.cpp owns setup()/loop() and the
+// PCINT0 vector, dispatching to this firmware or the D650C emulator per the
+// EEPROM firmware-select byte. Rename our entry points accordingly.
+#ifdef SUPEROS_COMBINED
+#include "combined.h"
+#define setup superos_setup
+#define loop  superos_loop
+#endif
 #include "settings.h"
 
 // Global device settings (MIDI channel, clock source, OUT/THRU). Defined here,
@@ -82,7 +91,13 @@ static inline void midiNoteOff(uint8_t n)           { if (!midi_out_live()) retu
 // a stalled loop would let the RX FIFO overflow and slip the sequencer off the
 // incoming clock. Downstream sync survives an occasional missed byte; the loop's
 // timing must not.
-static inline void midiRT(uint8_t b)                { if (!midi_out_live()) return; if (Serial1.availableForWrite() > 0) Serial1.write(b); }
+static inline void midiRT(uint8_t b) {
+  if (!midi_out_live()) return;
+  if (Serial1.availableForWrite() > 0) Serial1.write(b);
+#ifdef SUPEROS_USB_MIDI
+  usbMIDI.sendRealTime(b);         // mirror clock/start/stop over USB-C
+#endif
+}
 
 // ---------------------------------------------------------------------------
 // Debounced inputs (3-sample shift register, sampled once per ~1 ms loop pass)
@@ -119,6 +134,19 @@ static Mode     prev_mode  = PATTERN_PLAY;
 static uint8_t  prev_fired = 0;       // last step's voices, for MIDI note-offs
 
 static uint16_t frame      = 0;       // step-LED frame shown by ScanAndDisplay
+
+#ifdef SUPEROS_COMBINED
+// Config menu (mirrors the SuperOS-303 combined build): FUNCTION held + CLEAR
+// enters, CLEAR or FUNCTION exits. Inside, step 9 — the "G#" key, counting the
+// step buttons as chromatic notes from C — reboots into the D650C emulator.
+// The step-9 LED shows solid while SuperOS is the running firmware (the
+// emulator's menu blinks it, same convention as the 303).
+static bool s_cfg_menu = false;
+static bool s_cfg_hold = false;   // exit chord still held: keep the mode
+                                  // handlers frozen so the CLEAR that closed
+                                  // the menu can't chase-delete / clear-pattern
+static constexpr uint8_t GSHARP_STEP = 8;   // step 9, 0-based
+#endif
 
 // --- tempo tracker for the stopped blink -----------------------------------
 // While STOPPED the tempo clock on the PA3 status line is a NARROW pulse train
@@ -204,7 +232,12 @@ static void clk_track_edge(uint32_t now) {
   }
 }
 
-ISR(PCINT0_vect) {
+#ifdef SUPEROS_COMBINED
+void superos_pcint()                    // called from combined.cpp's PCINT0 ISR
+#else
+ISR(PCINT0_vect)
+#endif
+{
   if ((PORTF & 0x0F) != 0x0F) return;   // matrix scan in progress: PB3 != status
   if (!(PINB & (1 << 3))) return;       // only rising edges
   clk_track_edge(micros());
@@ -229,6 +262,25 @@ static uint32_t s_last_mclk_ms = 0;
 static bool     s_hw_run       = false;   // panel START/STOP toggle-FF latch
 static bool     s_want_run     = false;   // combined transport (panel OR MIDI)
 
+// --- DIN-sync start alignment ------------------------------------------------
+// RUN (PA0) and the tempo/DIN clock (PA3) are debounced identically, but a sync
+// master raises RUN on (or a hair after) a clock edge, and depending on where
+// the two edges fall against the ~1 ms sampling grid the clock edge's debounced
+// recognition can land one loop pass BEFORE the run's. That tick was then
+// swallowed while still "stopped" and step 1 fired a whole 24-PPQN pulse
+// (~20 ms at 120 BPM) late; whether it was swallowed was a sub-millisecond
+// coin flip per start, so DIN sync needed repeated stop/starts to land in time.
+// Remember when the last polled clock edge was seen; a start replays an edge
+// this recent so step 1 stays on the master's downbeat pulse. The window is
+// well under half a 24-PPQN period (>= 4 ms up to ~300 BPM), so a spec master
+// that raises RUN while the clock is LOW (its NEXT edge is the downbeat) never
+// trips it: its last edge is at least a half period old at RUN. In internal
+// mode the stopped clock pulses are too narrow for the polled scan to see, so
+// panel starts are unaffected.
+static const uint32_t CLK_EDGE_GRACE_US = 3000;
+static uint32_t s_clk_edge_us   = 0;      // micros() of the last polled clock edge
+static bool     s_clk_edge_seen = false;  // cleared once stale / consumed
+
 static inline uint8_t abs_pat(uint8_t s) { return (uint8_t)(disp_group * 16 + s); }
 static inline uint16_t led_bit(uint8_t n) { return (uint16_t)1 << n; }
 
@@ -238,7 +290,23 @@ static void send_note_offs() {
   prev_fired = 0;
 }
 
+// USB policy, same scheme as SuperOS-303: builds made for USB MIDI
+// (SUPEROS_USB_MIDI) keep USB alive and serviced; every other build tears the
+// USB engine down here, because the Teensy core's usb_init() (run before
+// setup()) otherwise leaves an unserviced USB controller running.
+#ifndef SUPEROS_USB_MIDI
+static void usb_shutdown_hw() {
+  UDIEN  = 0;
+  UDCON  = 1;                 // detach
+  USBCON = (1 << FRZCLK);
+  PLLCSR = 0;
+}
+#endif
+
 void setup() {
+#ifndef SUPEROS_USB_MIDI
+  usb_shutdown_hw();
+#endif
   // Pull up the MIDI RX line so an unplugged 3.5mm/DIN jack can't leave the
   // input floating and self-clock the UART from matrix/EMI noise — which now
   // matters because spurious 0xF8 bytes would drive the sequencer (sync IN).
@@ -449,6 +517,14 @@ void loop() {
   // too (remote selections move disp_group, which sections 6/8 then display).
   MidiClockIn mc;
   midi_rx_poll(eng, disp_group, mc);
+
+#ifdef SUPEROS_COMBINED
+  // SysEx 0x4D: reboot into the D650C emulator. Flush edits to flash first.
+  if (midi_take_fw_switch() == FW_D650) {
+    save_dirty(eng);
+    combined_switch_firmware(FW_D650);
+  }
+#endif
   // In INTERNAL/DIN clock mode the MIDI clock + transport are ignored entirely:
   // the 606 always runs from its own TEMPO knob / rear DIN-sync jack. (SysEx,
   // notes and program change in midi_rx_poll are unaffected.)
@@ -469,10 +545,17 @@ void loop() {
   if (runB.falling()) s_hw_run = false;
   const bool want_run = s_hw_run || mc.transport;
 
+  bool replay_tick = false;   // start landed just after a swallowed clock edge
   if ((want_run && !s_want_run) || (mc.started && want_run)) {       // start / resync
     eng.Start(mode == TRACK_PLAY || mode == TRACK_WRITE);
     { const uint8_t sreg = SREG; cli(); s_clk_running = true; SREG = sreg; }
     midiRT(0xFA);
+    // A clock edge recognized within the grace window before this start was
+    // swallowed by the not-yet-running engine (see CLK_EDGE_GRACE_US): replay
+    // it below so step 1 fires on the master's downbeat pulse, not the next
+    // one. An edge rising in THIS pass is counted normally by section 5.
+    replay_tick = !ext_sync && !clkB.rising() && s_clk_edge_seen &&
+                  (uint32_t)(micros() - s_clk_edge_us) < CLK_EDGE_GRACE_US;
   }
   if (!want_run && s_want_run) {                                     // stop
     eng.Stop();
@@ -501,6 +584,17 @@ void loop() {
     { const uint8_t sreg = SREG; cli(); clk_track_edge(micros()); SREG = sreg; }
     midiRT(0xF8);
     ticks = 1;
+    s_clk_edge_us   = micros();
+    s_clk_edge_seen = true;
+  } else if (replay_tick) {
+    // the pre-start edge swallowed by the debounce race: tick the engine now.
+    // Its 0xF8 already went out and the tempo tracker already saw it when the
+    // edge itself was polled; only the engine tick was lost.
+    ticks = 1;
+    s_clk_edge_seen = false;
+  } else if (s_clk_edge_seen &&
+             (uint32_t)(micros() - s_clk_edge_us) >= CLK_EDGE_GRACE_US) {
+    s_clk_edge_seen = false;   // stale: also guards the ~71 min micros() wrap
   }
   for (uint8_t t = 0; t < ticks; ++t) {
     if (eng.ClockTick()) {
@@ -513,6 +607,35 @@ void loop() {
       if (eng.step == 0) midi_send_step_position(eng.cur_pat);
     }
   }
+
+#ifdef SUPEROS_COMBINED
+  // 5b. combined-build config menu. Editing is frozen while it is up (the
+  // mode handlers below are skipped); transport, clock and the MIDI link keep
+  // running. The entry/exit CLEAR presses never reach the mode handlers: the
+  // early return covers the menu itself, and s_cfg_hold extends it until the
+  // exit chord is physically released (a CLEAR still held on exit would
+  // otherwise chase-delete steps while running, or clear a pattern stopped).
+  if (!s_cfg_menu && !s_cfg_hold &&
+      fnB.held() && clearB.rising() && !tapB.held()) {
+    s_cfg_menu = true;
+  } else if (s_cfg_menu && (clearB.rising() || fnB.rising())) {
+    s_cfg_menu = false;
+    s_cfg_hold = true;
+  }
+  if (s_cfg_hold && !clearB.held() && !fnB.held()) s_cfg_hold = false;
+  if (s_cfg_menu || s_cfg_hold) {
+    if (s_cfg_menu && stepB[GSHARP_STEP].rising()) {  // G#: boot the D650C
+      save_dirty(eng);
+      combined_switch_firmware(FW_D650);         // does not return
+    }
+    midi_tx_service(eng);
+    if (midi_take_save_request(eng)) save_dirty(eng);
+    if (midi_take_settings_save(eng)) save_settings(g_settings);
+    eng.SetGroupLed(disp_group);
+    frame = led_bit(GSHARP_STEP);       // solid = SuperOS is the running firmware
+    return;
+  }
+#endif
 
   // 6. mode dispatch
   if (mode != prev_mode) {
