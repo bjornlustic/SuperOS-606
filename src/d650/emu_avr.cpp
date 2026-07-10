@@ -412,10 +412,26 @@ static const uint32_t CYC_PER_US_Q16   = 7447;    // 113.636 kHz in 16.16
 static const uint32_t INT_PERIOD_CYC_Q8 = 52364;  // 1.8 ms in machine cycles, Q8
 static const uint32_t EMU_MAX_BATCH    = 384;
 static const uint32_t EMU_MAX_BACKLOG  = 1024;
+// Machine cycles in one clock-sample period (~700 us). Bounding each inner
+// d650_run to this many cycles keeps clock_sample() on its fixed ~1.4 kHz beat
+// even when a whole batch is owed (see the batch loop for why).
+static const uint32_t CLK_SAMPLE_CYC   = (CLK_SAMPLE_GAP_US * CYC_PER_US_Q16) >> 16;
 static uint32_t g_last_us = 0, g_budget_q16 = 0;
 static int32_t  s_int_due_q8 = 0;
 
 void emu_setup() {
+#ifndef SUPEROS_USB_MIDI
+  // No USB in this build: tear down the engine the Teensy core's usb_init()
+  // brought up before setup(). Leaving it alive at 16 MHz wedges the unit on a
+  // cold boot into emu mode (same failure mode that auto-ran SuperOS). This
+  // mirrors SuperOS setup()'s usb_shutdown_hw(); the firmware-SWITCH path in
+  // combined.cpp already shuts USB down, but a direct power-on into D650C does
+  // not pass through it.
+  UDIEN  = 0;
+  UDCON  = 1;                 // detach
+  USBCON = (1 << FRZCLK);
+  PLLCSR = 0;
+#endif
 #ifdef SUPEROS_USB_MIDI
   usbMIDI.setHandleSystemExclusive(usb_sysex_chunk);   // 3-arg partial overload
 #endif
@@ -464,7 +480,17 @@ void emu_loop() {
   if (owed > EMU_MAX_BATCH) owed = EMU_MAX_BATCH;
   g_budget_q16 -= owed << 16;
 
-  // batched execution, chunked so each /INT edge lands on its emulated cycle
+  // batched execution, chunked so each /INT edge lands on its emulated cycle,
+  // and so the physical tempo-clock line is re-sampled at its fixed ~1.4 kHz
+  // cadence WITHIN the batch. A full owed batch is up to EMU_MAX_BATCH cycles =
+  // ~3.4 ms of a single d650_run; sampling the clock only once per emu_loop
+  // (the old placement) therefore sampled the knob oscillator at ~300 Hz,
+  // irregularly, which aliased near the top of the knob's range -- the "slow,
+  // fast, then slow again" tempo. Capping each inner run to CLK_SAMPLE_CYC (one
+  // sampler period) lets clock_sample keep its 700 us beat regardless of how
+  // many cycles are owed. This is the SuperOS-303 emulator's clock fix (sample
+  // the tempo line at a fixed rate decoupled from the interpreter) adapted to
+  // the 606 emulator, which has no LED-refresh ISR to snapshot the line for us.
   uint32_t spent = 0;
   while (spent < owed) {
     if (s_int_due_q8 <= 0) {
@@ -474,9 +500,13 @@ void emu_loop() {
     uint32_t chunk = owed - spent;
     const uint32_t due = (uint32_t)(s_int_due_q8 + 255) >> 8;
     if (chunk > due) chunk = due;
+    if (chunk > CLK_SAMPLE_CYC) chunk = CLK_SAMPLE_CYC;
     const uint32_t ran = d650_run(&H, chunk);
     spent += ran;
     s_int_due_q8 -= (int32_t)(ran << 8);
+    const uint32_t t = micros();
+    clock_sample(t);                        // fixed ~1.4 kHz tempo-line sampling
+    clock_service(t);                       // stretcher stays current mid-batch
   }
   if (spent > owed) {                       // overshoot <= one instruction
     const uint32_t oq = (spent - owed) << 16;
