@@ -38,9 +38,21 @@ extern "C" {
 #include "emu/ucom4.h"
 #include "emu/d650_host.h"
 }
-#include "emu/tr606_rom.h"
+#include "rom_store.h"
+
+#ifndef SUPEROS_VERSION
+#define SUPEROS_VERSION "dev"     // injected by tools/version_flag.py
+#endif
 
 static d650_host H;
+
+// The mask ROM is user-supplied (see rom_store.h): loaded from EEPROM into
+// SRAM at boot and executed from there (D650_ROM_IN_RAM). If no valid ROM is
+// stored, emu_loop sits in an upload-wait mode until one arrives over MIDI.
+static uint8_t s_rom[D650_ROM_SIZE];
+static bool    s_rom_valid = false;   // EEPROM copy present + checksummed
+static bool    s_rom_busy  = false;   // transfer in progress: interpreter frozen
+static RomRx   s_rrx;
 
 // ---------------------------------------------------------------------------
 // MIDI note out: COMMON TRIG rising edge -> Note On per data bit, Note Off
@@ -252,6 +264,23 @@ static void midi_poll(uint32_t now_us) {
       else if (b == 0xFC) s_midi_run = 0;
       continue;
     }
+    // Mask-ROM upload (rom_store.h format). The receiver decodes straight
+    // into s_rom, so a confirmed block start freezes the interpreter; a
+    // failed or aborted transfer restores s_rom from the EEPROM copy.
+    switch (s_rrx.feed(b, millis())) {
+      case ROMRX_STARTED: s_rom_busy = true; break;
+      case ROMRX_BLOCK:   break;            // stay frozen for the next block
+      case ROMRX_DONE:                       // persist + clean reboot into emu
+        patt_flush_blocking();
+        rom_save(s_rom);
+        combined_switch_firmware(FW_D650);   // does not return
+        break;
+      case ROMRX_ERROR:
+        if (s_rom_valid && s_rom_busy) rom_load(s_rom);
+        s_rom_busy = false;
+        break;
+      default: break;
+    }
     if (b == 0xF0) { s_sx_on = 1; s_sx_n = 0; continue; }
     if (b == 0xF7) {
       // F0 7D 4D <fw> F7 -> switch firmware (combined.h)
@@ -260,6 +289,17 @@ static void midi_poll(uint32_t now_us) {
         if (fw == FW_SUPEROS) {
           patt_flush_blocking();            // the store must land before reboot
           combined_switch_firmware(FW_SUPEROS);
+        }
+      }
+      // F0 7D 34 F7 -> version request (same command SuperOS answers; the
+      // suffix tells the editor the emulator side is running). Best-effort:
+      // skipped if the TX FIFO lacks room, never blocks the interpreter.
+      if (s_sx_on && s_sx_n >= 2 && s_sx[0] == 0x7D && s_sx[1] == 0x34) {
+        static const char v[] = SUPEROS_VERSION " D650C";
+        if (Serial1.availableForWrite() >= (int)sizeof(v) + 3) {
+          Serial1.write((uint8_t)0xF0); Serial1.write((uint8_t)0x7D); Serial1.write((uint8_t)0x35);
+          for (uint8_t i = 0; v[i]; ++i) Serial1.write((uint8_t)(v[i] & 0x7F));
+          Serial1.write((uint8_t)0xF7);
         }
       }
       s_sx_on = 0; s_sx_n = 0;
@@ -298,11 +338,28 @@ static void patt_flush_blocking() {         // worst case ~3.4 s (full store)
   while (s_pending) { wdt_reset(); patt_save_step(); }
 }
 
+// Seed the whole uPD444 store to the empty state (all-zero nibbles). Blocking,
+// ~3.4 s worst case on a flash-erased store, but eeprom_update_byte skips bytes
+// that already match, so a clean store costs only reads. Runs once, the first
+// boot after the store is (re)initialized. H.ext is already zero from d650_init.
+static void patt_seed_blocking() {
+  for (uint16_t i = 0; i < D650_EXT_BYTES; ++i) {
+    eeprom_update_byte(EE_EMU_PATT + i, 0);
+    if ((i & 0x3F) == 0) wdt_reset();
+  }
+}
+
 static void patt_load() {
   if (eeprom_read_byte(EE_EMU_MAGIC) != EE_EMU_MAGIC_VAL) {
+    // Fresh or migrated store: write the empty state NOW, magic LAST, so a power
+    // loss mid-seed leaves the magic virgin and the seed simply repeats. The old
+    // code deferred this via s_pending, but upload-wait mode never runs the
+    // saver, so the store could stay flash-erased 0xFF (= every step of every
+    // pattern filled) while the magic already claimed "initialized" — the
+    // ROM-upload "all patterns filled" bug. Seeding synchronously fixes it.
+    patt_seed_blocking();
     eeprom_update_byte(EE_EMU_MAGIC, EE_EMU_MAGIC_VAL);
-    s_pending = true;                       // seed the EEPROM from the zeroed store
-    return;
+    return;                                 // H.ext already zeroed by d650_init
   }
   eeprom_read_block(H.ext, EE_EMU_PATT, D650_EXT_BYTES);
 }
@@ -406,6 +463,28 @@ static void feed_inputs() {
 }
 
 // ---------------------------------------------------------------------------
+// Mask-ROM transfer housekeeping
+// ---------------------------------------------------------------------------
+// Stalled transfer (sender unplugged mid-message): reset the receiver and, if
+// the running ROM's buffer was already dirtied, restore it from EEPROM.
+static void romrx_service() {
+  if ((s_rom_busy || s_rrx.busy()) && (millis() - s_rrx.last_ms) > 2000) {
+    s_rrx.reset();
+    if (s_rom_valid && s_rom_busy) rom_load(s_rom);
+    s_rom_busy = false;
+  }
+}
+
+// Upload-wait display (no valid ROM stored): steps 1 and 9 alternate, slow
+// while idle, fast while a transfer is running. Static single-column PORTF
+// writes only, so nothing here can disturb the MIDI byte pump.
+static void romwait_display() {
+  const uint16_t period = s_rrx.busy() ? 100 : 400;
+  const bool phase = (millis() / period) & 1;
+  hw::LightCell(phase ? 2 : 0, 0);          // step 9 / step 1
+}
+
+// ---------------------------------------------------------------------------
 // Real-time pacing (constants measured on the 303: 113636 cyc/s sustained)
 // ---------------------------------------------------------------------------
 static const uint32_t CYC_PER_US_Q16   = 7447;    // 113.636 kHz in 16.16
@@ -438,8 +517,11 @@ void emu_setup() {
   pinMode(MIDI_IN_PIN, INPUT_PULLUP);       // same rationale as SuperOS setup()
   Serial1.begin(31250);
   hw::Init();                               // selects high, data/trig lines low
+  s_rrx.buf = s_rom;
+  s_rom_valid = rom_load(s_rom);            // user mask ROM: EEPROM -> SRAM
+  if (!s_rom_valid) memset(s_rom, 0, sizeof s_rom);
   d650_drivers drv = { hook_port, nullptr, emu_read_clock };
-  d650_init(&H, tr606_rom, &drv);
+  d650_init(&H, s_rom, &drv);
   patt_load();
   g_last_us = micros();
 }
@@ -448,6 +530,32 @@ void emu_loop() {
   const uint32_t now = micros();
 
   midi_poll(now);
+  romrx_service();
+
+  // No mask ROM stored: upload-wait mode. midi_poll above keeps consuming the
+  // transfer (and still honors the F0 7D 4D 00 F7 switch back to SuperOS);
+  // the interpreter has no ROM to execute. The panel stays alive enough for
+  // the standard config menu: FUNCTION held + CLEAR opens it (step 9 blinks),
+  // step 9 boots SuperOS, CLEAR or FUNCTION drops back to upload-wait.
+  if (!s_rom_valid) {
+    static uint32_t rw_poll_us = 0;
+    if ((int32_t)(now - rw_poll_us) >= 0) {
+      rw_poll_us = now + 4000;              // same cadence as the live scan
+      poll_matrix();
+      menu_service();                       // step 9 inside = boot SuperOS
+    }
+    if (!s_menu) romwait_display();         // menu_service draws while open
+    return;
+  }
+
+  // Live transfer into the running emulator: ROM frozen (like the menu) until
+  // the transfer completes (reboot) or fails (s_rom restored, flag cleared).
+  if (s_rom_busy) {
+    g_last_us = now;
+    g_budget_q16 = 0;
+    return;
+  }
+
   clock_sample(now);
   clock_service(now);
 

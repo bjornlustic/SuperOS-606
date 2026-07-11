@@ -112,14 +112,17 @@ static void process_sysex(uint8_t *data, uint16_t len) {
     if (packed_len + 8 > len)
       return;
 
-    PORTD = (PORTD & 0x0F) | (count++ << 4); // cycle LEDs while writing
+    // progress: cycle step LEDs 1-4 (PORTF: select 0 low, one PG row high).
+    // The old PORTD indicator was the 303's; on the 606 PD4-7 go to the RAM
+    // data bus, so nothing was visible.
+    PORTF = 0x0E | (uint8_t)(0x10 << (count++ & 3));
 
     // if they match, cksum will become zero
     cksum ^= decode_7bit(&data[8], packed_len, page_buffer);
     if (cksum) {
-      // uh-oh bad checksum, slow blink forever
+      // uh-oh bad checksum: blink step LEDs 1-4 together forever
       while (1) {
-        PORTD ^= 0xF0;
+        PORTF ^= 0xF0;
         _delay_ms(200);
       }
     }
@@ -152,10 +155,10 @@ static void midi_task(void) {
 }
 
 int main(void) {
+  MCUSR = 0;     // clear WDRF so a watchdog reboot can't pin WDE on
   wdt_disable();
   DDRF = 0xFF; // select pin outputs
   DDRB = 0x00; // button inputs
-  DDRD |= 0xF0; // direct LED outputs (but also the MIDI serial lines)
   uart_init();
 
   // check for button combo to stop the jump
@@ -163,19 +166,13 @@ int main(void) {
   PORTF = 0x0F;
   _delay_ms(40);
   if (PINB & (1 << 1)) { // hold WRITE/NEXT/TAP to stay in bootloader
-    // indicate bootloader mode: TIME, PITCH, FUNCTION, and A# key LEDS, all on
-    PORTD |= 0xF0;
-    // flash each LED twice for sanity check
+    // indicate bootloader mode on the 606's own step LEDs: blink steps 1-4
+    // twice, then hold step 1 solid while waiting for SysEx
     for (uint8_t i = 0; i < 4; ++i) {
-      _delay_ms(100);
-      PORTD ^= (1 << (4 + i));
-      _delay_ms(100);
-      PORTD ^= (1 << (4 + i));
-      _delay_ms(100);
-      PORTD ^= (1 << (4 + i));
-      _delay_ms(100);
-      PORTD ^= (1 << (4 + i));
+      PORTF = (i & 1) ? 0x0E : 0xFE;
+      _delay_ms(150);
     }
+    PORTF = 0x1E;  // step 1 solid = bootloader resident
 
     while (1) {
       midi_task();

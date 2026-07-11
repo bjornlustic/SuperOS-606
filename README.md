@@ -24,35 +24,54 @@ Requires [PlatformIO](https://platformio.org/) and a git checkout (the SysEx pac
 reads the git rev into the output filename).
 
 ```sh
-pio run                  # app + bootloader, packs SuperOS-606_v*_<rev>.syx + .hex
-pio run -e app           # just the app
+pio run -e bootloader -e flash-service -e combined
+                         # bootloader + service + combined app; packs the app
+                         # .syx and merges SuperOS-606_v*_combined_<rev>-full.hex
+                         # (the merge happens on the app build, so build the
+                         # bootloader and service first / at the same time)
+pio run -e app           # just the plain 4 MHz app
 pio run -e app-debug     # app with USB serial + DEBUG for bench testing
-pio run -e flash-service # SPM flash-write service -> service-install.syx (install once)
 ```
 
-Outputs (git-ignored): `SuperOS-606_v*.hex` (merged app + bootloader, for Teensy
-Loader / ISP) and `SuperOS-606_v*.syx` (for the MIDI SysEx bootloader).
+Outputs (git-ignored): `SuperOS-606_v*-full.hex` (app + bootloader + SPM flash
+service, for ISP) and `SuperOS-606_v*_<env>_<rev>.syx` (app only, for the MIDI
+SysEx bootloader). `service-install.syx` installs just the flash service over
+MIDI on a board that has the bootloader but lost the service.
 
 ## Flashing
 
-Two paths, depending on what the board exposes:
+Two paths:
 
-1. **Teensy Loader / ISP over USB** — flash the merged `SuperOS-606_v*.hex`.
-2. **On-board MIDI SysEx bootloader** — hold the bootloader-entry button at power-on,
-   then send `SuperOS-606_v*.syx` over MIDI IN (throttle the send).
+1. **ISP (Atmel-ICE / usbasp)** — flash the merged `SuperOS-606_v*-full.hex`
+   (app + MIDI bootloader + SPM flash service in one image):
 
-### One-time setup — install the flash service
+   ```sh
+   pio run -e bootloader -e flash-service -e combined   # builds + merges the full hex
+   avrdude -c atmelice_isp -p usb1286 -U flash:w:SuperOS-606_v*_combined_*-full.hex:i
+   ```
 
-> **Do this once per board or your patterns will not survive power-off.**
-> Pattern/track persistence (including patterns pushed from the web editor) goes
-> through a tiny SPM flash-write service that must be installed one time:
->
-> 1. Build it: `pio run -e flash-service` (produces `service-install.syx`).
-> 2. Enter the bootloader (hold the bootloader-entry button at power-on).
-> 3. Send `service-install.syx` over MIDI IN.
->
-> Without it everything still runs — patterns just live in RAM and are lost when
-> the unit powers off. Firmware updates never overwrite the installed service.
+   **Always use the `-full` hex over ISP.** `avrdude -U flash:w:` chip-erases the
+   whole part first, so ISP-flashing a bare app hex silently deletes the MIDI
+   bootloader and the flash service: TAP-at-power-on stops entering the
+   bootloader (the unit just boots the app) and patterns stop surviving
+   power-off. The chip erase also wipes the internal EEPROM (D650C patterns +
+   the uploaded mask ROM) unless the EESAVE fuse is programmed (hfuse `0xD2`
+   instead of `0xDA`).
+
+2. **On-board MIDI SysEx bootloader** (no ISP tool needed, once the full image
+   is on the board): hold **WRITE/NEXT (TAP)** while powering on. Step LEDs 1-4
+   blink twice, then step 1 stays lit solid: the bootloader is waiting. Send
+   the app `.syx` with the throttled sender:
+
+   ```sh
+   python3 tools/send_syx.py SuperOS-606_v*_combined_<rev>.syx -p "Your MIDI Port"
+   ```
+
+   Step LEDs 1-4 cycle while pages write; the unit boots the new app when the
+   final EXECUTE message lands. If LEDs 1-4 blink together forever, a page
+   checksum failed: power-cycle into the bootloader and send again with a
+   bigger delay (`-d 0.2`). SysEx flashing only rewrites the app pages, never
+   the bootloader, the service, or the EEPROM.
 
 ## Web pattern editor
 
@@ -94,6 +113,37 @@ python3 -m http.server 8080 --directory tools/web-pattern-edit
 
 or just press F5 in VS Code / Cursor — `.vscode/launch.json` serves the editor on
 port 3000 with live reload and opens it in Chrome.
+
+## D650C emulator mode and the mask ROM
+
+The combined build (`pio run -e combined`) can boot either SuperOS-606 or a
+cycle-accurate emulator of the original NEC D650C-128 CPU, selected per boot
+(SuperOS config menu: hold FUNCTION, tap CLEAR, then press step 9; or SysEx
+`F0 7D 4D 01 F7`).
+
+The original mask ROM is copyrighted and is **not** included in this firmware
+or repository. To use the emulator you must supply your own dump of the D650C
+ROM, e.g. dumped from your own unit, as permitted by your local law. The flow:
+
+1. Flash the combined firmware. It boots SuperOS; the emulator has no ROM yet.
+2. Switch to D650C mode (config menu, step 9). With no ROM stored the 606
+   enters **ROM upload mode**: step LEDs 1 and 9 blink alternately while it
+   waits.
+3. In the web editor, use **D650C mask ROM → Load ROM dump** and pick your
+   dump: a raw 2048-byte `.bin`, or a `.syx` already in the RE-303/recpu
+   nibble format. The editor checksums it and tells you whether it matches the
+   known-good TR-606 ROM (sha1 `ae605ce2…`).
+4. **Send to 606** (or save the converted `.syx` and send it with any SysEx
+   tool). The transfer takes about 1.5 s, the 606 stores the ROM in its
+   internal EEPROM (a few seconds) and reboots straight into the emulator.
+
+The upload is checksummed per block and the stored copy is validated at every
+boot, so a failed or interrupted transfer just leaves the 606 waiting in
+upload mode. Sending a ROM to a **running** emulator also works (it freezes,
+stores, and reboots), so a ROM can be replaced later. To leave upload mode
+without a ROM, use the normal config menu: hold FUNCTION, tap CLEAR (step 9
+blinks), then press step 9 to boot SuperOS. Alternatives: send
+`F0 7D 4D 00 F7`, or power on holding CLEAR + FUNCTION + PATTERN GROUP.
 
 ## License
 

@@ -18,8 +18,8 @@
 //   number"), PE0/PE1 = A8/A9. Chip select: PE2 -> IC7, PE3 -> IC8, gated by
 //   PI1 ("Memory CE") through IC6 (HD14011 NAND); PI0 = "Memory WE", shared,
 //   33k pullup (R83). CPU-side strobe polarity is behind the D650_*_ACTIVE
-//   macros below — confirmed by observing the ROM's parking levels in the
-//   host testbench (test/), not guessed from the gate drawing.
+//   macros below — confirmed by observing the emulated machine in the host
+//   testbench, not guessed from the gate drawing.
 #pragma once
 #include <stdint.h>
 #include "ucom4.h"
@@ -44,9 +44,9 @@ extern "C" {
 #define D650_EXT_NIBS  2048
 #define D650_EXT_BYTES (D650_EXT_NIBS / 2)
 
-// Strobe polarity at the CPU pins, confirmed from the ROM's own primitives
-// (disassembly: read = SPB PI1 / IP PORTC / RPB PI1 at 0x004; write = PORTC
-// data, SPB PI1, SPB+RPB PI0 pulse, RPB PI1, PORTC 0 at 0x00C).
+// Strobe polarity at the CPU pins, confirmed by observing the emulated
+// machine's uPD444 accesses in the host testbench (not guessed from the gate
+// drawing).
 #ifndef D650_WE_ACTIVE
 #define D650_WE_ACTIVE 1   // PI0 pulses HIGH around a write
 #endif

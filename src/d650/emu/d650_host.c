@@ -14,8 +14,8 @@ extern void d650_trace_read_ab(d650_host *h, char port, uint8_t v);
 #endif
 
 // ---- external uPD444 RAM (2x 1024x4, IC7/IC8) --------------------------------
-// Decode derived from the ROM's own access idioms (read prim @0x004, write
-// prim @0x00C, step fetch @0x361) + schematic: PI1 = CE strobe (active high
+// Decode derived from the schematic and validated in the host testbench:
+// PI1 = CE strobe (active high
 // at the CPU). PE2 picks the chip (0 = IC7, 1 = IC8); per-chip address =
 // PE3<<9 | PE0<<8 | PF<<4 | PD  (PD = rhythm 0-15, PF = step 0-15, PE0 =
 // pattern group I/II — which is exactly why PE0 doubles as the I/II panel

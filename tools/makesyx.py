@@ -18,6 +18,34 @@ def make_syx(target, source, env):
     with open(out_path, "wb") as f:
         hex2sysex.process(hex_path, f)
     print("makesyx: wrote %d bytes" % os.path.getsize(out_path))
+    make_full_hex(hex_path, out_path[:-4] + "-full.hex", env)
+
+def make_full_hex(app_hex, out_path, env):
+    # Merge the complete ISP image: this app + the MIDI bootloader + the SPM
+    # flash service. ISP flashing chip-erases the whole part, so a bare app
+    # hex silently removes the bootloader and the service; the -full hex is
+    # the one to flash with avrdude. Runs on every app build so it can never
+    # go stale; build the other two envs first:
+    #   pio run -e bootloader -e flash-service -e combined
+    from intelhex import IntelHex
+    boot = os.path.join(env["PROJECT_DIR"], ".pio", "build", "bootloader", "firmware.hex")
+    service = os.path.join(env["PROJECT_DIR"], ".pio", "build", "flash-service", "firmware.hex")
+    if not os.path.exists(boot):
+        print("makesyx: no bootloader hex, skipping -full.hex (pio run -e bootloader first)")
+        return
+    def load(path):
+        h = IntelHex(path)
+        h.start_addr = None   # drop ELF entry records; they differ per image
+        return h
+    ih = load(app_hex)
+    ih.merge(load(boot))
+    if os.path.exists(service):
+        ih.merge(load(service))
+    else:
+        print("makesyx: WARNING: flash-service hex missing, -full.hex has no SPM service")
+    ih.write_hex_file(out_path)
+    print(f"makesyx: wrote {os.path.basename(out_path)} (app + bootloader"
+          + (" + flash service)" if os.path.exists(service) else ")"))
 
 git_rev = get_git_rev()
 pioenv = env["PIOENV"]

@@ -31,7 +31,14 @@ static constexpr uint8_t CMD_PUSH_TRACK    = 0x26;
 static constexpr uint8_t CMD_REQ_SETTINGS  = 0x30;
 static constexpr uint8_t CMD_SETTINGS_DUMP = 0x31;
 static constexpr uint8_t CMD_SET_SETTINGS  = 0x32;
+static constexpr uint8_t CMD_REQ_VERSION   = 0x34;
+static constexpr uint8_t CMD_VERSION       = 0x35;   // reply: ASCII "0.3 159f80e"
 static constexpr uint8_t CMD_SET_FIRMWARE  = 0x4D;   // combined builds: 7D 4D <fw>
+
+// Injected by tools/version_flag.py (version + short git rev).
+#ifndef SUPEROS_VERSION
+#define SUPEROS_VERSION "dev"
+#endif
 
 // Set by CMD_SET_FIRMWARE; consumed by midi_take_fw_switch(). -1 = none.
 static int8_t fw_switch_request = -1;
@@ -167,6 +174,17 @@ void midi_send_settings() {
                            (uint8_t)(g_settings.clock_source & 0x7F),
                            (uint8_t)(g_settings.out_mode     & 0x7F), 0xF7 };
   midi_tx_msg(msg, sizeof(msg));
+}
+
+// Version reply (0x35): the build's version + git rev as 7-bit ASCII.
+static void midi_send_version() {
+  static const char v[] = SUPEROS_VERSION;
+  uint8_t msg[4 + sizeof(v) - 1];
+  uint8_t n = 0;
+  msg[n++] = 0xF0; msg[n++] = SYX_MFR; msg[n++] = CMD_VERSION;
+  for (uint8_t i = 0; v[i]; ++i) msg[n++] = (uint8_t)(v[i] & 0x7F);
+  msg[n++] = 0xF7;
+  midi_tx_msg(msg, n);
 }
 
 // Panel-edit broadcasts: keep the web editor's copy live while writing on the
@@ -308,6 +326,7 @@ static void handle_sysex(Engine &eng, uint8_t &disp_group) {
       break;
     case CMD_PUSH_TRACK: handle_push_track(eng); break;
     case CMD_REQ_SETTINGS: midi_send_settings(); break;
+    case CMD_REQ_VERSION:  midi_send_version();  break;
     case CMD_SET_SETTINGS:
       // 7D 32 <channel> <clock_source> <out_mode>: apply to RAM now (audible
       // immediately), flag for the deferred flash write, then echo the
