@@ -102,7 +102,23 @@ inline void ScanAndDisplay(uint16_t frame, uint8_t cell[4], uint8_t *status,
 
   for (uint8_t s = 0; s < 4; ++s) {
     const uint8_t leds = (uint8_t)((frame >> (4 * s)) & 0x0F);
-    PORTF = (uint8_t)((0x0F & ~(1 << s)) | (leds << 4));  // select low + LED rows
+    // Anti-ghost column entry, the D650C ROM's own drive discipline (traced
+    // from the emulator core and verified on hardware with the src/diag
+    // ghost_matrix bisection, 2026-07-10). Going straight from one active
+    // column to the next in a single PORTF write makes every lit LED glow
+    // faintly at the same row of the two adjacent columns (steps n+/-4, diag
+    // modes 1 and 5). Passing through an all-selects-parked state and writing
+    // the rows before engaging the select eliminates it at this cadence (diag
+    // mode 3). The switch-read schedule below is untouched: reads still start
+    // SCAN_SETTLE_US after the select engages. The 10 us parks are safe for
+    // the PA3 pin-change ISR: during them the status group is legitimately
+    // gated onto PA, and stale key levels only produce falling edges, which
+    // the ISR's level check rejects.
+    PORTF = (uint8_t)((PORTF & 0xF0) | 0x0F);   // park selects, rows unchanged
+    delayMicroseconds(10);
+    PORTF = (uint8_t)((leds << 4) | 0x0F);      // new rows while parked
+    delayMicroseconds(10);
+    PORTF = (uint8_t)((0x0F & ~(1 << s)) | (leds << 4));  // engage select
     delayMicroseconds(SCAN_SETTLE_US);
     uint8_t v = 0;
     for (uint8_t j = 0; j < 4; ++j) {
