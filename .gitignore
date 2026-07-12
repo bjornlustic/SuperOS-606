@@ -10,3 +10,5 @@ docs/
 release/*-with-rom/
 # personal ROM-embedded builds: generated header, copyrighted contents
 src/d650/rom_embed.h
+# (release/** negation above must not resurrect these)
+**/.DS_Store
