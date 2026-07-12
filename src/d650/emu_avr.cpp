@@ -39,6 +39,9 @@ extern "C" {
 #include "emu/d650_host.h"
 }
 #include "rom_store.h"
+#ifdef D650_ROM_EMBEDDED
+#include "rom_embed.h"   // generated locally, gitignored (personal builds only)
+#endif
 
 #ifndef SUPEROS_VERSION
 #define SUPEROS_VERSION "dev"     // injected by tools/version_flag.py
@@ -519,6 +522,15 @@ void emu_setup() {
   hw::Init();                               // selects high, data/trig lines low
   s_rrx.buf = s_rom;
   s_rom_valid = rom_load(s_rom);            // user mask ROM: EEPROM -> SRAM
+#ifdef D650_ROM_EMBEDDED
+  // Personal builds (env:combined-rom) carry the user's own ROM in program
+  // flash: when the EEPROM holds no valid upload, run from the embedded copy.
+  // An EEPROM upload still wins, and the MIDI upload path stays available.
+  if (!s_rom_valid) {
+    memcpy_P(s_rom, D650_ROM_EMBED, D650_ROM_SIZE);
+    s_rom_valid = true;
+  }
+#endif
   if (!s_rom_valid) memset(s_rom, 0, sizeof s_rom);
   d650_drivers drv = { hook_port, nullptr, emu_read_clock };
   d650_init(&H, s_rom, &drv);

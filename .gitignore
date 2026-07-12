@@ -8,3 +8,5 @@ docs/
 # copyrighted and must never enter the repo)
 !release/**
 release/*-with-rom/
+# personal ROM-embedded builds: generated header, copyrighted contents
+src/d650/rom_embed.h
