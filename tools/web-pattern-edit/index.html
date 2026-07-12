@@ -146,6 +146,10 @@
     /* ── MIDI status ── */
     #midiStatus { font-size: 11px; font-weight: 600; color: var(--gray-3); letter-spacing: 0.02em; padding-left: 8px; }
     #fwVersion  { font-size: 11px; font-weight: 600; color: var(--gray-4); letter-spacing: 0.02em; padding-left: 8px; }
+    #devRom     { font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; padding: 1px 7px; border: 1.5px solid var(--gray-3); color: var(--gray-4); white-space: nowrap; }
+    #devRom:empty { display: none; }
+    #devRom.is-ok   { border-color: #000; color: #000; }
+    #devRom.is-warn { border-color: #c00; color: #c00; }
     #deviceMode { font-size: 11px; font-weight: 700; letter-spacing: 0.02em; padding-left: 8px; }
     body.is-d650c #deviceMode { color: var(--red); }
     /* In D650C emulator mode the SuperOS pattern editor is locked out, exactly
@@ -482,6 +486,7 @@
         <button class="btn-ghost" id="btnMidi">Connect MIDI</button>
         <span id="midiStatus">Not connected</span>
         <span id="fwVersion" title="Firmware version reported by the 606"></span>
+        <span id="devRom" title="Whether a D650C mask ROM is installed on the 606 (uploaded to EEPROM or built into the firmware)"></span>
         <span id="deviceMode" title="Which firmware the 606 is currently running"></span>
       </div>
     </div>
@@ -570,7 +575,7 @@
         <button class="btn" id="btnRomLoad"
           title="The original D650C mask ROM is copyrighted and is NOT distributed with SuperOS-606. Load your own dump: a raw 2048-byte .bin, or a recpu/RE-303-format .syx">&#8593; Load ROM dump</button>
         <input type="file" id="fileRom" accept=".bin,.syx" />
-        <span id="romStatus">no ROM loaded</span>
+        <span id="romStatus" title="File loaded into this converter (the chip in the MIDI strip above shows what is installed on the 606 itself)">no file loaded</span>
       </div>
     </div>
     <div class="group">
@@ -816,6 +821,9 @@
   var CMD_SETTINGS_DUMP = 0x31;   // 606 -> editor: channel, clock source, out mode
   var CMD_SET_SETTINGS  = 0x32;   // editor -> 606: apply + persist global settings
   var CMD_REQ_VERSION   = 0x34;   // editor -> 606: request firmware version
+  var CMD_REQ_ROM       = 0x36;   // editor -> 606: D650C mask-ROM status?
+  var CMD_ROM_STATUS    = 0x37;   // 606 -> editor: 0 none, 1 EEPROM upload,
+                                  //                2 embedded build, 0x7F n/a
   var CMD_VERSION       = 0x35;   // 606 -> editor: ASCII version + git rev
   var ACK_NAMES = ['ok', 'bad_checksum', 'bad_index', 'bad_length'];
 
@@ -1138,6 +1146,7 @@
   var autoSyncDone = false;  // full sync ran for the current port pair
   var deviceMode = null;     // null unknown, 'superos', or 'd650c' (from the version reply)
   var lastVersionSeen = '';  // de-dupes the version-poll log
+  var lastRomStatusSeen = ''; // de-dupes the ROM-status log
 
   // Apply the 606's running firmware to the UI. In D650C emulator mode the
   // SuperOS pattern editor is locked out (like the 303 editor): the .lockable
@@ -1161,7 +1170,10 @@
   // upload reboot, or a firmware-switch SysEx) is reflected here without a
   // reconnect. Sent raw so it does not spam the MIDI log.
   function pollDeviceMode() {
-    if (midiOut && midiIn) midiOut.send([0xf0, SYX_MFR, CMD_REQ_VERSION, 0xf7]);
+    if (midiOut && midiIn) {
+      midiOut.send([0xf0, SYX_MFR, CMD_REQ_VERSION, 0xf7]);
+      midiOut.send([0xf0, SYX_MFR, CMD_REQ_ROM, 0xf7]);   // device ROM state chip
+    }
   }
   setInterval(pollDeviceMode, 2000);
   var pendingReq = -1, pendingReqTimer = null;   // manual-request diagnostics
@@ -2109,7 +2121,7 @@
         maskRom = null;
         document.getElementById('btnRomSyx').disabled = true;
         document.getElementById('btnRomSend').disabled = true;
-        romSetStatus('no ROM loaded');
+        romSetStatus('no file loaded');
         showErrorToast('ROM load failed: ' + e);
       }
     };
@@ -2394,6 +2406,25 @@
       document.getElementById('fwVersion').textContent = 'fw v' + ver.replace(/\s*D650C\s*$/i, '');
       if (ver !== lastVersionSeen) { lastVersionSeen = ver; log('Firmware version: ' + ver, 'log-syx'); }
       applyDeviceMode(isD650 ? 'd650c' : 'superos');
+      return;
+    }
+
+    if (cmd === CMD_ROM_STATUS && bytes.length >= 3) {
+      // device-side D650C mask-ROM state (independent of any file loaded into
+      // the converter below): 0 none, 1 uploaded to EEPROM, 2 embedded in the
+      // firmware build, 0x7F firmware without the emulator
+      var rs = bytes[2];
+      var el = document.getElementById('devRom');
+      var txt = rs === 0    ? 'D650C ROM: not on device'
+              : rs === 1    ? 'D650C ROM: on device'
+              : rs === 2    ? 'D650C ROM: built in'
+              : '';
+      el.textContent = txt;
+      el.className = (rs === 1 || rs === 2) ? 'is-ok' : (rs === 0 ? 'is-warn' : '');
+      if (txt && txt !== lastRomStatusSeen) {
+        lastRomStatusSeen = txt;
+        log('606 reports ' + txt, 'log-syx');
+      }
       return;
     }
 
@@ -2698,6 +2729,7 @@
           if (midiOut && midiIn && !syncQueue.length) startFullSync();
           requestSettings();   // pull the 606's MIDI channel / clock / out-thru
           sendSysex(new Uint8Array([SYX_MFR, CMD_REQ_VERSION]));
+          sendSysex(new Uint8Array([SYX_MFR, CMD_REQ_ROM]));
         }, 400);
       }
     } else if (midiOut && !midiIn) {

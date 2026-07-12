@@ -33,6 +33,9 @@ static constexpr uint8_t CMD_SETTINGS_DUMP = 0x31;
 static constexpr uint8_t CMD_SET_SETTINGS  = 0x32;
 static constexpr uint8_t CMD_REQ_VERSION   = 0x34;
 static constexpr uint8_t CMD_VERSION       = 0x35;   // reply: ASCII "0.3 159f80e"
+static constexpr uint8_t CMD_REQ_ROM       = 0x36;   // editor -> 606: D650C ROM status?
+static constexpr uint8_t CMD_ROM_STATUS    = 0x37;   // reply: 0 none, 1 EEPROM upload,
+                                                     //        2 embedded build, 0x7F n/a
 static constexpr uint8_t CMD_SET_FIRMWARE  = 0x4D;   // combined builds: 7D 4D <fw>
 
 // Injected by tools/version_flag.py (version + short git rev).
@@ -192,6 +195,38 @@ static void midi_send_version() {
   midi_tx_msg(msg, n);
 }
 
+// D650C mask-ROM status (0x36 -> 0x37). In combined builds the ROM lives in
+// the internal EEPROM (rom_store.h layout: magic byte, sum16, 2 KB data); a
+// streaming sum check avoids needing a 2 KB buffer (~1 ms of EEPROM reads,
+// on-demand only). ROM-embedded builds report 2 when the EEPROM is empty.
+// Plain builds have no emulator: 0x7F = not applicable.
+#ifdef SUPEROS_COMBINED
+#include <avr/eeprom.h>
+#include "combined.h"
+static uint8_t rom_status() {
+  if (eeprom_read_byte(EE_ROM_MAGIC) == EE_ROM_MAGIC_VAL) {
+    uint16_t s = 0;
+    for (uint16_t i = 0; i < 2048; ++i)
+      s = (uint16_t)(s + eeprom_read_byte(EE_ROM_DATA + i));
+    const uint16_t want = (uint16_t)eeprom_read_byte(EE_ROM_SUM)
+                        | ((uint16_t)eeprom_read_byte(EE_ROM_SUM + 1) << 8);
+    if (s == want) return 1;
+  }
+#ifdef D650_ROM_EMBEDDED
+  return 2;
+#else
+  return 0;
+#endif
+}
+#else
+static uint8_t rom_status() { return 0x7F; }
+#endif
+
+static void midi_send_rom_status() {
+  const uint8_t msg[5] = { 0xF0, SYX_MFR, CMD_ROM_STATUS, rom_status(), 0xF7 };
+  midi_tx_msg(msg, sizeof(msg));
+}
+
 // Panel-edit broadcasts: keep the web editor's copy live while writing on the
 // 606 (step entry, tap write, chase-delete, length, scale). Tiny messages,
 // human-rate — fine to drop if the queue is somehow full.
@@ -334,6 +369,7 @@ static void handle_sysex(Engine &eng, uint8_t &disp_group) {
     case CMD_PUSH_TRACK: handle_push_track(eng); break;
     case CMD_REQ_SETTINGS: midi_send_settings(); break;
     case CMD_REQ_VERSION:  midi_send_version();  break;
+    case CMD_REQ_ROM:      midi_send_rom_status(); break;
     case CMD_SET_SETTINGS:
       // 7D 32 <channel> <clock_source> <out_mode>: apply to RAM now (audible
       // immediately), flag for the deferred flash write, then echo the

@@ -305,6 +305,19 @@ static void midi_poll(uint32_t now_us) {
           Serial1.write((uint8_t)0xF7);
         }
       }
+      // F0 7D 36 F7 -> D650C ROM status (0x37 reply, same codes as SuperOS:
+      // 0 none, 1 EEPROM upload, 2 embedded build). s_rom_valid is what the
+      // interpreter actually runs; the magic byte says where it came from.
+      if (s_sx_on && s_sx_n >= 2 && s_sx[0] == 0x7D && s_sx[1] == 0x36) {
+        uint8_t st = 0;
+        if (s_rom_valid)
+          st = (eeprom_read_byte(EE_ROM_MAGIC) == EE_ROM_MAGIC_VAL) ? 1 : 2;
+        if (Serial1.availableForWrite() >= 5) {
+          Serial1.write((uint8_t)0xF0); Serial1.write((uint8_t)0x7D);
+          Serial1.write((uint8_t)0x37); Serial1.write(st);
+          Serial1.write((uint8_t)0xF7);
+        }
+      }
       s_sx_on = 0; s_sx_n = 0;
       continue;
     }
