@@ -45,14 +45,30 @@ inline bool flash_persist_begin() {
   return g_flash_ok;
 }
 
-// Load patterns + tracks. Power-on selection is deliberately NOT restored:
+// Flash-resident pattern IO hooks (registered with the Engine). Patterns live in
+// the flash block store; only the active one is cached in RAM. Read returns false
+// on a blank/older block so the cache falls back to an empty pattern.
+inline bool flash_pat_read(uint8_t idx, Pattern &out) {
+  if (!g_flash_ok) return false;
+  uint8_t buf[FE_MAX_PAYLOAD];
+  if (g_flash.read(FB_PATTERN_BASE + idx, buf, PATTERN_BYTES) != PATTERN_BYTES) return false;
+  deserialize_pattern(out, buf);
+  return true;
+}
+inline bool flash_pat_write(uint8_t idx, const Pattern &in) {
+  if (!g_flash_ok) return false;
+  uint8_t buf[FE_MAX_PAYLOAD];
+  serialize_pattern(in, buf);
+  return g_flash.write(FB_PATTERN_BASE + idx, buf, PATTERN_BYTES);
+}
+
+// Register the pattern hooks and load tracks. Patterns are loaded lazily by the
+// engine cache on first access. Power-on selection is deliberately NOT restored:
 // the device always wakes on pattern 1, group I, like the stock 606.
 inline void load_all(Engine &eng) {
+  eng.SetPatIO(flash_pat_read, flash_pat_write);   // hooks self-guard on g_flash_ok
   if (!g_flash_ok) return;
   uint8_t buf[FE_MAX_PAYLOAD];
-  for (uint8_t i = 0; i < NUM_PATTERNS; ++i)
-    if (g_flash.read(FB_PATTERN_BASE + i, buf, PATTERN_BYTES) == PATTERN_BYTES)
-      deserialize_pattern(eng.pattern[i], buf);
   for (uint8_t i = 0; i < NUM_TRACKS; ++i)
     if (g_flash.read(FB_TRACK_BASE + i, buf, TRACK_BYTES) == TRACK_BYTES)
       deserialize_track(eng.track[i], buf);
@@ -84,13 +100,8 @@ inline void save_settings(const Settings &s) {
 // write halts the CPU for a few ms, so call only while the sequencer is stopped.
 inline void save_dirty(Engine &eng) {
   if (!g_flash_ok) return;
+  eng.Flush();                  // persist the dirty pattern cache + any deferred write
   uint8_t buf[FE_MAX_PAYLOAD];
-  for (uint8_t i = 0; i < NUM_PATTERNS; ++i) {
-    if (!(eng.dirty_pat & ((uint32_t)1 << i))) continue;
-    serialize_pattern(eng.pattern[i], buf);
-    if (g_flash.write(FB_PATTERN_BASE + i, buf, PATTERN_BYTES))
-      eng.dirty_pat &= ~((uint32_t)1 << i);
-  }
   for (uint8_t i = 0; i < NUM_TRACKS; ++i) {
     if (!(eng.dirty_trk & (1 << i))) continue;
     serialize_track(eng.track[i], buf);

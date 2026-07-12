@@ -10,9 +10,14 @@
 //   - RUNNING + PATTERN CLEAR held: steps are deleted as the chase passes them.
 //   - RUNNING + WRITE/NEXT (TAP): records the current instrument on whichever
 //     step is playing at that moment.
-//   - FUNCTION + step button: sets the pattern length (running or stopped).
-//   - Move the SCALE switch, then press FUNCTION: the new scale is armed and
-//     activates at the next start of the pattern (immediately when stopped).
+//   - FUNCTION is the tool gateway (PATTERN WRITE only): hold FUNCTION = tool
+//     map on the step LEDs, FUNCTION + step = enter that tool, tap FUNCTION =
+//     exit. Tools: length (per-pattern + GROUP-chord global), scale + swing,
+//     copy/paste/clear, transform, accent, probability, flam, mute, reslice,
+//     arp, direction, pattern-gen, save. FUNCTION + CLEAR = config menu (any
+//     mode). Pattern length and scale live in their tools now.
+//   - 64-step patterns: 4 sections of 16. GROUP pages sections (running, or a
+//     GROUP tap inside a section-aware tool); stopped, GROUP = pattern bank.
 //   - STOPPED: step buttons select the pattern to edit (within the current
 //     group); hold a pattern's step and press PATTERN CLEAR to erase it.
 //   - PATTERN GROUP toggles group I/II here too (selection + display).
@@ -123,11 +128,12 @@ struct RotaryDb {
 static Engine   eng;
 static Controls panel;
 
-static PinState stepB[MAX_STEPS];
+static PinState stepB[NUM_STEP_BTNS];
 static PinState clearB, fnB, groupB, tapB, runB, clkB;
 static RotaryDb modeDb, instDb, scaleDb;
 
 static uint8_t  disp_group = 0;       // 0 = group I, 1 = group II
+static uint8_t  disp_section = 0;     // 0..3: which 16-step section is shown/edited
 static int8_t   anchor     = -1;      // pattern-play chain anchor (step index)
 static Mode     prev_mode  = PATTERN_PLAY;
 
@@ -135,18 +141,66 @@ static uint8_t  prev_fired = 0;       // last step's voices, for MIDI note-offs
 
 static uint16_t frame      = 0;       // step-LED frame shown by ScanAndDisplay
 
+// FUNCTION layer: the tool selector and the config menu.
+//   - Hold FUNCTION: the step LEDs show the 16-tool map.
+//   - FUNCTION + step: enter that tool (stays latched).
+//   - Tap FUNCTION (no step): exit the tool, back to the base mode.
+//   - FUNCTION + CLEAR: open the config menu (CLEAR or FUNCTION exits).
+// While a tool or the menu is active the base-mode handlers are frozen; s_menu_hold
+// keeps them frozen until the exit chord is released (so the closing CLEAR can't
+// chase-delete / clear a pattern), exactly as the original combined config menu did.
+static uint8_t s_tool         = 0;      // 0 = base mode; 1..16 = active tool
+static bool    s_fn_step_used = false;  // a step / CLEAR was used during this FN hold
+static bool    s_menu         = false;  // config menu open
+static bool    s_menu_hold    = false;  // exit chord still held: keep handlers frozen
+static uint8_t s_scale_ref    = 0xFF;   // SCALE position at tool entry: tools that read
+                                        // the switch only react to a CHANGE from this,
+                                        // so entering a tool never silently applies
+                                        // whatever position the switch happens to sit at
+static bool    s_grp_used     = false;  // GROUP was chorded with a step inside a tool
+static uint32_t s_fn_up_ms    = 0;      // millis() of the last FUNCTION release: step
+                                        // presses shortly after are swallowed, so a
+                                        // late tool-map press can't fall through and
+                                        // write a stray step into the pattern
 #ifdef SUPEROS_COMBINED
-// Config menu (mirrors the SuperOS-303 combined build): FUNCTION held + CLEAR
-// enters, CLEAR or FUNCTION exits. Inside, step 9 — the "G#" key, counting the
-// step buttons as chromatic notes from C — reboots into the D650C emulator.
-// The step-9 LED shows solid while SuperOS is the running firmware (the
-// emulator's menu blinks it, same convention as the 303).
-static bool s_cfg_menu = false;
-static bool s_cfg_hold = false;   // exit chord still held: keep the mode
-                                  // handlers frozen so the CLEAR that closed
-                                  // the menu can't chase-delete / clear-pattern
-static constexpr uint8_t GSHARP_STEP = 8;   // step 9, 0-based
+static constexpr uint8_t GSHARP_STEP = 8;   // step 9: reboots into the D650C emulator
 #endif
+
+// Tool IDs == step number (1..16). Only a subset is implemented in this build;
+// the rest are reserved and show a placeholder on the LEDs.
+enum {
+  TOOL_NONE = 0,
+  TOOL_LENGTH = 1, TOOL_SCALE = 2, TOOL_COPY = 3, TOOL_XFORM = 4,
+  TOOL_ACCENT = 5, TOOL_PROB = 6, TOOL_FLAM = 7, TOOL_POLY = 8,
+  TOOL_MUTE = 9, TOOL_RESLICE = 10, TOOL_ARP = 11, TOOL_DIR = 12,
+  TOOL_GEN = 13, TOOL_SAVE = 14,
+};
+// Implemented-tool slots, for the FUNCTION-held map display.
+static constexpr uint16_t TOOLS_IMPLEMENTED =
+  (1u << (TOOL_LENGTH - 1)) | (1u << (TOOL_SCALE   - 1)) |
+  (1u << (TOOL_COPY   - 1)) | (1u << (TOOL_XFORM   - 1)) |
+  (1u << (TOOL_ACCENT - 1)) | (1u << (TOOL_PROB    - 1)) |
+  (1u << (TOOL_FLAM   - 1)) | (1u << (TOOL_POLY    - 1)) |
+  (1u << (TOOL_MUTE   - 1)) | (1u << (TOOL_RESLICE - 1)) |
+  (1u << (TOOL_ARP    - 1)) | (1u << (TOOL_DIR     - 1)) |
+  (1u << (TOOL_GEN    - 1)) | (1u << (TOOL_SAVE    - 1));
+
+// How many 16-step sections a length spans (1..NUM_SECTIONS).
+static inline uint8_t sections_for(uint8_t len) {
+  if (len < 1) len = 1;
+  uint8_t n = (uint8_t)(((len - 1) >> 4) + 1);
+  return n > NUM_SECTIONS ? NUM_SECTIONS : n;
+}
+// An instrument's own reachable (playable) length: the pattern length if the row
+// follows it; its own loop if polymeter; but a bar-reset row is capped by the bar
+// (it plays step s%ilen with s < pattern length, so steps past the bar never sound).
+static inline uint8_t inst_disp_len(uint8_t inst) {
+  const Pattern &p = eng.cur();
+  const uint8_t il = p.ilen[inst & 7];
+  if (!il) return p.length;
+  if ((p.poly >> (inst & 7)) & 1) return il;                 // polymeter: full loop
+  return il < p.length ? il : p.length;                      // bar-reset: capped
+}
 
 // --- tempo tracker for the stopped blink -----------------------------------
 // While STOPPED the tempo clock on the PA3 status line is a NARROW pulse train
@@ -337,34 +391,42 @@ void setup() {
 static void handle_pattern_write(uint8_t inst) {
   // PATTERN GROUP toggles group I/II here too (changes which pattern the step
   // buttons select while stopped, and the pattern-number display)
-  if (groupB.rising()) disp_group ^= 1;
-
-  // SCALE switch is armed by a FUNCTION press; activates at next pattern start
-  if (fnB.rising()) {
-    eng.ArmScale(scaleDb.value);
-    midi_send_scale_update(eng.cur_pat, scaleDb.value);
+  // GROUP: while running it pages through the step sections that the current
+  // instrument actually reaches (never past its length); while stopped it
+  // toggles the pattern bank (I/II) for pattern selection.
+  const uint8_t nsec = sections_for(inst_disp_len(inst));
+  if (disp_section >= nsec) disp_section = 0;               // length shrank under us
+  if (groupB.rising()) {
+    if (eng.running) disp_section = (uint8_t)((disp_section + 1) % nsec);
+    else             disp_group ^= 1;
   }
 
-  const bool fn = fnB.held();
-  for (uint8_t s = 0; s < MAX_STEPS; ++s) {
-    if (!stepB[s].rising()) continue;
-    if (fn) {                                               // FUNCTION + step = length
-      eng.SetLength(s + 1);
-      midi_send_length_update(eng.cur_pat, s + 1);
-    } else if (eng.running) {                               // enter/remove steps (running only)
+  // FUNCTION is the tool gateway (handled in loop() before dispatch), so this
+  // handler only runs when FUNCTION is up. The step buttons map to the shown
+  // section: absolute step = disp_section*16 + button. Steps past the current
+  // instrument's length are hidden and not editable (their data is preserved).
+  // A press landing just after FUNCTION was released is almost always a late
+  // tool-map press, not a step entry — swallow it (see s_fn_up_ms).
+  const bool fn_grace = (uint32_t)(millis() - s_fn_up_ms) < 250;
+  for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b) {
+    if (!stepB[b].rising() || fn_grace) continue;
+    if (eng.running) {                                      // enter/remove steps (running only)
+      const uint8_t s = (uint8_t)(disp_section * NUM_STEP_BTNS + b);
+      if (s >= inst_disp_len(inst)) continue;              // beyond this row's length
       eng.ToggleStep(inst, s);
-      midi_send_step_update(eng.cur_pat, inst, s, (eng.cur().steps[inst] >> s) & 1);
+      midi_send_step_update(eng.cur_pat, inst, s, eng.cur().step_get(inst, s));
     } else {
-      eng.SelectPattern(abs_pat(s));                        // stopped: pick pattern to edit
+      eng.SelectPattern(abs_pat(b));                        // stopped: pick pattern to edit
+      disp_section = 0;                                     // new pattern starts on section 1
     }
   }
 
   if (eng.running) {
     // chase-delete: while PATTERN CLEAR is held, erase the current instrument's
-    // steps as the chase light passes them
+    // steps as the chase light passes them (across all sections)
     if (clearB.held() && eng.step_advanced && eng.step >= 0) {
       const uint8_t cs = (uint8_t)eng.step;
-      if ((eng.cur().steps[inst] >> cs) & 1) {
+      if (eng.cur().step_get(inst, cs)) {
         eng.ClearStep(inst, cs);
         midi_send_step_update(eng.cur_pat, inst, cs, false);
       }
@@ -378,10 +440,10 @@ static void handle_pattern_write(uint8_t inst) {
     // hold a pattern's step button + press PATTERN CLEAR = erase that pattern
     if (clearB.rising()) {
       bool cleared = false;
-      for (uint8_t s = 0; s < MAX_STEPS; ++s)
-        if (stepB[s].held()) {
-          eng.ClearPattern(abs_pat(s));
-          midi_send_pattern_dump(abs_pat(s));   // editor refreshes from the dump
+      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
+        if (stepB[b].held()) {
+          eng.ClearPattern(abs_pat(b));
+          midi_send_pattern_dump(abs_pat(b));   // editor refreshes from the dump
           cleared = true;
         }
       if (cleared) save_dirty(eng);
@@ -392,12 +454,12 @@ static void handle_pattern_write(uint8_t inst) {
 static void handle_pattern_play() {
   if (groupB.rising()) disp_group ^= 1;
 
-  for (uint8_t s = 0; s < MAX_STEPS; ++s) {
+  for (uint8_t s = 0; s < NUM_STEP_BTNS; ++s) {
     if (!stepB[s].rising()) continue;
 
     // another step already held? -> build a range chain
     int8_t other = -1;
-    for (uint8_t a = 0; a < MAX_STEPS; ++a)
+    for (uint8_t a = 0; a < NUM_STEP_BTNS; ++a)
       if (a != s && stepB[a].held()) { other = (int8_t)a; break; }
 
     if (other >= 0) {
@@ -426,8 +488,197 @@ static void handle_track_modes(Mode mode, uint8_t inst) {
       Track &t = eng.track[eng.cur_track];
       if (t.len > 0) eng.TrackTruncate(t.len - 1);
     } else {                           // held step + WRITE/NEXT: append that pattern
-      for (uint8_t s = 0; s < MAX_STEPS; ++s)
+      for (uint8_t s = 0; s < NUM_STEP_BTNS; ++s)
         if (stepB[s].held()) { eng.TrackAppend(abs_pat(s)); break; }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// FUNCTION tools (called instead of the base-mode handler while a tool is active)
+// ---------------------------------------------------------------------------
+static void handle_tool(uint8_t tool, uint8_t inst) {
+  const uint8_t base = (uint8_t)(disp_section * NUM_STEP_BTNS);   // section's first step
+  if (groupB.rising()) s_grp_used = false;             // fresh GROUP press: tap-vs-chord latch
+  switch (tool) {
+    case TOOL_LENGTH:                                  // step = pattern length (shown section)
+      // The Length tool NEVER writes pattern step data — step presses here only
+      // set lengths. TAP + step = the selected instrument's own loop length
+      // (turn the dial to view/set each voice); GROUP + step = global length.
+      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
+        if (stepB[b].rising()) {
+          const uint8_t len = (uint8_t)(base + b + 1); // absolute length 1..64
+          if (tapB.held()) {
+            eng.SetInstLength(inst, len);              // this voice's own loop
+            midi_send_pattern_dump(eng.cur_pat);       // mirror to the web editor
+          } else if (groupB.held()) {
+            eng.global_len = len;                      // GROUP chord: all patterns
+            s_grp_used = true;                         // don't page on release
+          } else {
+            eng.SetLength(len);
+            midi_send_length_update(eng.cur_pat, len);
+          }
+        }
+      if (clearB.rising()) {
+        if (tapB.held()) {
+          eng.SetInstLength(inst, 0);                  // TAP + CLEAR = voice follows pattern
+          midi_send_pattern_dump(eng.cur_pat);         // mirror to the web editor
+        } else {
+          eng.global_len = 0;                          // CLEAR = clear the global override
+        }
+      }
+      break;
+
+    case TOOL_SCALE: {                                 // SCALE switch = scale; steps = swing
+      if (scaleDb.value != s_scale_ref) {              // only on a CHANGE since tool entry
+        s_scale_ref = scaleDb.value;
+        eng.ArmScale(scaleDb.value);                   // applies at the next pattern wrap
+        midi_send_scale_update(eng.cur_pat, scaleDb.value);
+      }
+      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
+        if (stepB[b].rising()) eng.SetSwing(b);        // 0 = off .. 15 = max (per pattern)
+      break;
+    }
+
+    case TOOL_ACCENT:                                  // step = toggle the accent track (this section)
+      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
+        if (stepB[b].rising()) {
+          const uint8_t s = (uint8_t)(base + b);
+          eng.ToggleStep(INST_ACCENT, s);
+          midi_send_step_update(eng.cur_pat, INST_ACCENT, s, eng.cur().step_get(INST_ACCENT, s));
+        }
+      break;
+
+    case TOOL_PROB: {                                  // SCALE = level 0..3; step paints it (this section)
+      const uint8_t lvl = scaleDb.value & 3;           // SCALE 1 = always(0), 2..4 = rarer
+      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
+        if (stepB[b].rising()) { eng.cur().prob[base + b] = lvl; eng.mark_pat_dirty(eng.cur_pat); }
+      break;
+    }
+
+    case TOOL_COPY:                                    // 1 clear, 2 copy, 3 paste (whole pattern)
+      if (stepB[0].rising()) { eng.ClearPattern(eng.cur_pat); midi_send_pattern_dump(eng.cur_pat); }
+      if (stepB[1].rising())   eng.CopyPatternToBuf();
+      if (stepB[2].rising()) { eng.PastePatternFromBuf(); midi_send_pattern_dump(eng.cur_pat); }
+      break;
+
+    case TOOL_XFORM: {                                 // current instrument, shown section
+      bool changed = false;
+      if (stepB[0].rising()) { eng.RotateInst(inst, disp_section, false); changed = true; }  // left
+      if (stepB[1].rising()) { eng.RotateInst(inst, disp_section, true);  changed = true; }  // right
+      if (stepB[2].rising()) { eng.ReverseInst(inst, disp_section);       changed = true; }
+      if (stepB[3].rising()) { eng.RandomizeInst(inst, disp_section, scaleDb.value & 3); changed = true; }
+      if (changed) midi_send_pattern_dump(eng.cur_pat);
+      break;
+    }
+
+    case TOOL_MUTE:                                    // steps 1-8 = AC..CH mute toggle
+      for (uint8_t b = 0; b < NUM_INSTRUMENTS; ++b)
+        if (stepB[b].rising()) eng.mute_mask ^= (uint8_t)1 << b;
+      if (clearB.rising()) eng.mute_mask = 0xFE;       // mute all voices (keep accent bit 0)
+      if (tapB.rising())   eng.mute_mask = 0;          // unmute all
+      break;
+
+    case TOOL_DIR:                                     // steps 1-4 = fwd/back/random/ping-pong
+      for (uint8_t b = 0; b < 4; ++b)
+        if (stepB[b].rising()) eng.play_dir = b;
+      break;
+
+    case TOOL_GEN:                                     // TAP generates current instrument (this section)
+      if (tapB.rising()) {                             // SCALE sets density
+        eng.RandomizeInst(inst, disp_section, scaleDb.value & 3);
+        midi_send_pattern_dump(eng.cur_pat);
+      }
+      break;
+
+    case TOOL_FLAM: {                                  // SCALE = type; step = flam that step (this section)
+      if (scaleDb.value != s_scale_ref) {              // only on a CHANGE since tool entry
+        s_scale_ref = scaleDb.value;                   // (pos 1 = off, 2..4 = 1..3 extra hits)
+        eng.cur().flam_type = scaleDb.value & 3;
+        eng.mark_pat_dirty(eng.cur_pat);
+      }
+      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
+        if (stepB[b].rising()) { eng.cur().flam_tog(base + b); eng.mark_pat_dirty(eng.cur_pat); }
+      break;
+    }
+
+    case TOOL_RESLICE: {                               // hold a step = loop that many steps
+      uint8_t held = 0;
+      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b) if (stepB[b].held()) { held = (uint8_t)(b + 1); break; }
+      if (held) eng.ResliceOn(held); else eng.ResliceOff();
+      break;
+    }
+
+    case TOOL_ARP:                                     // steps 1-8 add notes; CLEAR empties
+      for (uint8_t b = 0; b < NUM_INSTRUMENTS; ++b)
+        if (stepB[b].rising()) eng.ArpAdd(b);          // instrument b (accent = rest)
+      if (clearB.rising()) eng.ArpClear();
+      break;
+
+    case TOOL_POLY:                                    // per-instrument loop mode + master
+      // steps 1-8 = AC..CH: LED lit = polymeter, off = bar-reset. Tap to toggle
+      // the current pattern's row. CLEAR = master ALL rows/patterns to bar-reset,
+      // TAP = master ALL to polymeter (clears the individual choices). The master
+      // actions rewrite every pattern in flash, so they only fire while stopped.
+      for (uint8_t b = 0; b < NUM_INSTRUMENTS; ++b)
+        if (stepB[b].rising()) {
+          eng.SetInstPoly(b, !eng.GetInstPoly(b));
+          midi_send_pattern_dump(eng.cur_pat);         // mirror to the web editor
+        }
+      if (!eng.running && clearB.rising()) {
+        eng.ApplyMasterPoly(false);                    // all rows, all patterns -> bar-reset
+        save_dirty(eng);
+        for (uint8_t p = 0; p < NUM_PATTERNS; ++p) midi_send_pattern_dump(p);
+      }
+      if (!eng.running && tapB.rising()) {
+        eng.ApplyMasterPoly(true);                     // all rows, all patterns -> polymeter
+        save_dirty(eng);
+        for (uint8_t p = 0; p < NUM_PATTERNS; ++p) midi_send_pattern_dump(p);
+      }
+      break;
+
+    default: break;                                    // reserved tools: no-op
+  }
+
+  // Section paging inside the section-aware tools: a GROUP tap (press + release
+  // with no step chorded) advances the shown 16-step section. The LENGTH tool
+  // pages the full 4 sections (you set lengths up to 64 there); the others page
+  // only the sections the pattern actually reaches. GROUP + step stays a chord
+  // (global length) in TOOL_LENGTH.
+  switch (tool) {
+    case TOOL_LENGTH: case TOOL_ACCENT: case TOOL_PROB:
+    case TOOL_FLAM:   case TOOL_XFORM:  case TOOL_GEN: {
+      const uint8_t nsec = (tool == TOOL_LENGTH) ? NUM_SECTIONS
+                                                 : sections_for(eng.cur().length);
+      if (disp_section >= nsec) disp_section = 0;
+      if (groupB.falling() && !s_grp_used)
+        disp_section = (uint8_t)((disp_section + 1) % nsec);
+      break;
+    }
+    default: break;
+  }
+}
+
+// Config menu (FUNCTION + CLEAR). Panel edits to the global settings; step 10
+// saves everything to flash.
+static void handle_config_menu() {
+  if (stepB[2].rising()) g_settings.out_mode ^= 1;        // step 3: OUT <-> THRU
+  if (stepB[7].rising()) g_settings.clock_source ^= 1;    // step 8: MIDI <-> INTERNAL clock
+  if (stepB[13].rising() && g_settings.midi_channel > 0)  g_settings.midi_channel--;  // step 14: ch down
+  if (stepB[14].rising() && g_settings.midi_channel < 16) g_settings.midi_channel++;  // step 15: ch up
+  // step 10: save all — only while stopped (each flash page write halts the CPU
+  // for a few ms, which would slip the sequencer off the clock mid-play)
+  if (stepB[9].rising() && !eng.running) { save_dirty(eng); save_settings(g_settings); }
+  // (master polymeter/bar-reset moved to the POLY tool in the FUNCTION map)
+
+  // Destructive clear-all (only while stopped): hold the step + press GROUP.
+  if (!eng.running && groupB.rising()) {
+    if (stepB[10].held()) {                                // step 11 + GROUP: clear all tracks
+      for (uint8_t t = 0; t < NUM_TRACKS; ++t) { eng.track[t].Clear(); eng.mark_trk_dirty(t); }
+      save_dirty(eng);
+    } else if (stepB[11].held()) {                         // step 12 + GROUP: clear all patterns
+      for (uint8_t p = 0; p < NUM_PATTERNS; ++p) eng.ClearPattern(p);
+      save_dirty(eng);                                     // flush the cached one too
     }
   }
 }
@@ -440,13 +691,23 @@ static uint16_t build_frame(Mode mode, uint8_t inst) {
 
   switch (mode) {
     case PATTERN_WRITE: {
-      if (fnB.held()) return led_bit(eng.cur().length - 1);          // length readout
       if (!eng.running) {                            // stopped: pattern number, blinking
         if (eng.cur_pat / 16 != disp_group) return 0;        // at the tempo (stock-style)
         return tempo_blink() ? led_bit(eng.cur_pat % 16) : 0;
       }
-      uint16_t f = eng.cur().steps[inst];                            // running: steps + chase
-      if (eng.step >= 0) f ^= led_bit((uint8_t)eng.step);
+      uint16_t f = eng.cur().steps[inst][disp_section];   // running: shown section's steps + chase
+      // Hide steps past the current instrument's length (data is kept, just not
+      // shown/editable until the length grows again).
+      const uint8_t el = inst_disp_len(inst);
+      const int16_t vis = (int16_t)el - (int16_t)(disp_section * NUM_STEP_BTNS);
+      if (vis <= 0)                 f  = 0;
+      else if (vis < NUM_STEP_BTNS) f &= (uint16_t)((1u << vis) - 1);
+      // Chase = this instrument's OWN playhead (poly rows track their own loop,
+      // past the bar; bar-reset/follow track the master), shown only when in the
+      // viewed section.
+      const uint8_t ph = eng.inst_playhead(inst);
+      if (ph != 0xFF && (ph >> 4) == disp_section)
+        f ^= led_bit((uint8_t)(ph & 15));
       return f;
     }
     case PATTERN_PLAY: {
@@ -480,6 +741,120 @@ static uint16_t build_frame(Mode mode, uint8_t inst) {
   return 0;
 }
 
+// True for tools whose step buttons address one 16-step section at a time.
+static bool tool_uses_sections(uint8_t t) {
+  return t == TOOL_LENGTH || t == TOOL_ACCENT || t == TOOL_PROB ||
+         t == TOOL_FLAM   || t == TOOL_XFORM  || t == TOOL_GEN;
+}
+
+// Section indicator on the PATTERN GROUP I/II LEDs (one selector level, so one
+// LED lit at a time): sections 1/2 = LED I / LED II steady; sections 3/4 = the
+// same pair flashing (~4 Hz alternation).
+static uint8_t section_led_level(uint8_t sec) {
+  const bool flash = (sec >= 2) && ((millis() >> 7) & 1);
+  return (uint8_t)((sec & 1) ^ (flash ? 1 : 0));
+}
+
+// Step LEDs while FUNCTION is held: implemented tools lit, the active one blinking.
+static uint16_t build_map_frame() {
+  const bool blink8 = (millis() >> 6) & 1;
+  uint16_t f = TOOLS_IMPLEMENTED;
+  if (s_tool && blink8) f &= (uint16_t)~led_bit((uint8_t)(s_tool - 1));
+  return f;
+}
+
+// Step LEDs for the active tool (FUNCTION released).
+static uint16_t build_tool_frame(uint8_t tool) {
+  const bool blink8 = (millis() >> 6) & 1;
+  switch (tool) {
+    case TOOL_LENGTH: {                                         // global blinks, per-pattern solid
+      uint8_t L;
+      bool blinkMark;
+      bool slowMark = false;                                    // slow pulse = polymeter row
+      if (tapB.held()) {                                        // TAP view: selected voice's length
+        const uint8_t ri = instDb.value & 7;
+        const uint8_t il = eng.cur().ilen[ri];
+        L = il ? il : eng.cur().length;
+        blinkMark = (il == 0);                                  // fast blink = following the pattern
+        slowMark  = il && eng.GetInstPoly(ri);                  // slow pulse = row is polymeter
+      } else {
+        L = eng.global_len ? eng.global_len : eng.cur().length;
+        blinkMark = (eng.global_len != 0);                      // blinking = global override active
+      }
+      if (((L - 1) >> 4) != disp_section) return 0;             // length marker not in this section
+      const uint16_t b = led_bit((uint8_t)((L - 1) & 15));
+      if (slowMark)  return ((millis() >> 8) & 1) ? b : 0;      // ~2 Hz pulse
+      return blinkMark ? (blink8 ? b : 0) : b;
+    }
+    case TOOL_SCALE: {                                          // swing amount as a bar
+      uint16_t f = 0;
+      const uint8_t sw = eng.cur().swing;
+      for (uint8_t i = 0; i <= sw && i < NUM_STEP_BTNS; ++i) f |= led_bit(i);
+      return f;
+    }
+    case TOOL_MUTE: {                                           // lit = active (unmuted)
+      uint16_t f = 0;
+      for (uint8_t i = 0; i < NUM_INSTRUMENTS; ++i)
+        if (!(eng.mute_mask & (1 << i))) f |= led_bit(i);
+      return f;
+    }
+    case TOOL_DIR:
+      return led_bit((uint8_t)(eng.play_dir & 3));              // one of steps 1-4
+    case TOOL_ACCENT:
+      return eng.cur().steps[INST_ACCENT][disp_section];        // accent track, shown section
+    case TOOL_PROB: {                                           // lit = step has a chance < 100%
+      uint16_t f = 0;
+      const uint8_t base = (uint8_t)(disp_section * NUM_STEP_BTNS);
+      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b) if (eng.cur().prob[base + b]) f |= led_bit(b);
+      return f;
+    }
+    case TOOL_COPY:                                             // 1 clear / 2 copy / 3 paste
+      return led_bit(0) | led_bit(1) | led_bit(2);
+    case TOOL_XFORM:                                            // 1 rotL / 2 rotR / 3 rev / 4 rand
+      return led_bit(0) | led_bit(1) | led_bit(2) | led_bit(3);
+    case TOOL_FLAM:                                             // lit = flammed steps, shown section
+      return eng.cur().flam[disp_section];
+    case TOOL_ARP: {                                            // bar = number of arp notes
+      uint16_t f = 0;
+      for (uint8_t i = 0; i < eng.arp_len && i < NUM_STEP_BTNS; ++i) f |= led_bit(i);
+      return f;
+    }
+    case TOOL_RESLICE:                                          // the stuttering playhead (in section)
+      return (eng.running && eng.step >= 0 && ((uint8_t)eng.step >> 4) == disp_section)
+                 ? led_bit((uint8_t)(eng.step & 15)) : 0;
+    case TOOL_POLY: {                                           // steps 1-8 lit = row is polymeter
+      uint16_t f = 0;
+      for (uint8_t i = 0; i < NUM_INSTRUMENTS; ++i)
+        if (eng.GetInstPoly(i)) f |= led_bit(i);
+      return f;
+    }
+    case TOOL_GEN: {                                            // show the voice's steps so a
+      const uint8_t gi = instDb.value & 7;                      // TAP-generated pattern is visible
+      uint16_t f = eng.cur().steps[gi][disp_section];
+      const uint8_t el = inst_disp_len(gi);
+      const int16_t vis = (int16_t)el - (int16_t)(disp_section * NUM_STEP_BTNS);
+      if (vis <= 0)                 f  = 0;
+      else if (vis < NUM_STEP_BTNS) f &= (uint16_t)((1u << vis) - 1);
+      const uint8_t ph = eng.inst_playhead(gi);
+      if (ph != 0xFF && (ph >> 4) == disp_section) f ^= led_bit((uint8_t)(ph & 15));
+      return f;
+    }
+    default:
+      return blink8 ? led_bit((uint8_t)(tool - 1)) : 0;        // reserved / TAP-driven: blink slot
+  }
+}
+
+// Step LEDs while the config menu is open: lit shows current settings.
+static uint16_t build_menu_frame() {
+  uint16_t f = led_bit(9);                                       // step 10 = save
+  if (g_settings.out_mode == OUT_MODE_THRU)        f |= led_bit(2);   // step 3 = THRU
+  if (g_settings.clock_source == CLK_SRC_INTERNAL) f |= led_bit(7);   // step 8 = INTERNAL clock
+#ifdef SUPEROS_COMBINED
+  f |= led_bit(GSHARP_STEP);          // step 9 solid = SuperOS is the running firmware
+#endif
+  return f;
+}
+
 void loop() {
   // 1. one combined matrix-scan + LED-display pass (~1 ms; the loop heartbeat).
   // The clock-pulse interrupt is masked during the pass: the status line hops
@@ -494,7 +869,7 @@ void loop() {
   PCMSK0 |= _BV(PCINT3);
 
   // 2. debounce everything
-  for (uint8_t s = 0; s < MAX_STEPS; ++s) stepB[s].push(panel.step(s));
+  for (uint8_t s = 0; s < NUM_STEP_BTNS; ++s) stepB[s].push(panel.step(s));
   clearB.push(panel.clear());
   fnB.push(panel.function());
   groupB.push(panel.group());
@@ -608,47 +983,92 @@ void loop() {
     }
   }
 
-#ifdef SUPEROS_COMBINED
-  // 5b. combined-build config menu. Editing is frozen while it is up (the
-  // mode handlers below are skipped); transport, clock and the MIDI link keep
-  // running. The entry/exit CLEAR presses never reach the mode handlers: the
-  // early return covers the menu itself, and s_cfg_hold extends it until the
-  // exit chord is physically released (a CLEAR still held on exit would
-  // otherwise chase-delete steps while running, or clear a pattern stopped).
-  if (!s_cfg_menu && !s_cfg_hold &&
-      fnB.held() && clearB.rising() && !tapB.held()) {
-    s_cfg_menu = true;
-  } else if (s_cfg_menu && (clearB.rising() || fnB.rising())) {
-    s_cfg_menu = false;
-    s_cfg_hold = true;
+  // 5b. Config menu. Press FUNCTION + CLEAR together to enter (either order), press
+  // either again to leave. The entry and exit are one if/else-if so the CLEAR that
+  // opens it can't also close it in the same pass. s_menu_hold keeps the mode
+  // handlers frozen until the exit chord is released (so a still-held CLEAR can't
+  // reach a mode handler). TAP held is the bootloader combo, so skip entry then.
+  if (fnB.rising()) s_fn_step_used = false;
+
+  if (!s_menu && !s_menu_hold && !tapB.held() &&
+      fnB.held() && clearB.held() && (fnB.rising() || clearB.rising())) {
+    s_menu = true;
+    s_fn_step_used = true;
+  } else if (s_menu && (clearB.rising() || fnB.rising())) {
+    s_menu = false;
+    s_menu_hold = true;
   }
-  if (s_cfg_hold && !clearB.held() && !fnB.held()) s_cfg_hold = false;
-  if (s_cfg_menu || s_cfg_hold) {
-    if (s_cfg_menu && stepB[GSHARP_STEP].rising()) {  // G#: boot the D650C
-      save_dirty(eng);
-      combined_switch_firmware(FW_D650);         // does not return
+  if (s_menu_hold && !clearB.held() && !fnB.held()) s_menu_hold = false;
+
+  if (s_menu || s_menu_hold) {
+    if (s_menu) {
+#ifdef SUPEROS_COMBINED
+      if (stepB[GSHARP_STEP].rising()) {         // G#: boot the D650C emulator
+        save_dirty(eng);
+        combined_switch_firmware(FW_D650);       // does not return
+      }
+#endif
+      handle_config_menu();
     }
     midi_tx_service(eng);
     if (midi_take_save_request(eng)) save_dirty(eng);
     if (midi_take_settings_save(eng)) save_settings(g_settings);
     eng.SetGroupLed(disp_group);
-    frame = led_bit(GSHARP_STEP);       // solid = SuperOS is the running firmware
+    frame = build_menu_frame();
     return;
   }
-#endif
 
-  // 6. mode dispatch
+  // FUNCTION tools live only in PATTERN WRITE. In PLAY / TRACK modes the step
+  // buttons select/chain patterns or edit tracks and FUNCTION is left alone.
+  const bool tools_ok = (mode == PATTERN_WRITE);
+
+  // FUNCTION held: step buttons pick a tool; releasing with no step pressed exits
+  // the current tool back to the base mode.
+  if (tools_ok && fnB.held()) {
+    for (uint8_t s = 0; s < NUM_STEP_BTNS; ++s)
+      if (stepB[s].rising()) {
+        s_tool = (uint8_t)(s + 1);
+        s_fn_step_used = true;
+        s_scale_ref = scaleDb.value;   // tools react only to SCALE moves made
+                                       // after entry, never to its resting spot
+        if (s_tool == TOOL_LENGTH) {   // open on the section holding the length
+          const uint8_t L = eng.global_len ? eng.global_len : eng.cur().length;
+          disp_section = (uint8_t)(((L - 1) >> 4) & 3);
+        }
+      }
+  }
+  if (fnB.falling()) {
+    s_fn_up_ms = millis();               // start the stray-step swallow window
+    if (!s_fn_step_used) s_tool = TOOL_NONE;
+  }
+
+  // 6. dispatch: base mode, or the active tool (frozen while FUNCTION is held)
   if (mode != prev_mode) {
     anchor = -1;
+    s_tool = TOOL_NONE;                 // turning the dial lands you in a base mode
+    disp_section = 0;                   // and on section 1
     if (!eng.running) save_dirty(eng);
     prev_mode = mode;
   }
-  switch (mode) {
-    case PATTERN_WRITE: handle_pattern_write(inst); break;
-    case PATTERN_PLAY:  handle_pattern_play();      break;
-    case TRACK_PLAY:
-    case TRACK_WRITE:   handle_track_modes(mode, inst); break;
+  if (tools_ok && fnB.held()) {
+    // selecting a tool / viewing the map: base + tool handlers frozen
+  } else if (tools_ok && s_tool != TOOL_NONE) {
+    handle_tool(s_tool, inst);
+  } else {
+    switch (mode) {
+      case PATTERN_WRITE: handle_pattern_write(inst); break;
+      case PATTERN_PLAY:  handle_pattern_play();      break;
+      case TRACK_PLAY:
+      case TRACK_WRITE:   handle_track_modes(mode, inst); break;
+    }
   }
+
+  // The arp is momentary, not a latch: leaving the ARP tool (tap FUNCTION,
+  // switch tools, or turn the mode dial) clears it so the pattern comes back.
+  // A latched arp full of rests read as a dead machine on the bench.
+  static uint8_t s_tool_prev = TOOL_NONE;
+  if (s_tool_prev == TOOL_ARP && s_tool != TOOL_ARP) eng.ArpClear();
+  s_tool_prev = s_tool;
 
   // 7. web-editor MIDI link, outgoing side: broadcast the selected pattern
   // (0x1E), service queued pattern/track dumps, and pump the TX queue. Incoming
@@ -659,8 +1079,14 @@ void loop() {
   if (midi_take_save_request(eng)) save_dirty(eng);
   if (midi_take_settings_save(eng)) save_settings(g_settings);   // editor changed a global
 
-  // 8. PATTERN GROUP I/II indicator + next display frame (the stopped tempo
-  // blink lives inside build_frame, on each mode's selected-pattern LED)
-  eng.SetGroupLed(disp_group);
-  frame = build_frame(mode, inst);
+  // 8. PATTERN GROUP LEDs + next display frame. Whenever sections are in play
+  // (pattern write running, or a section-aware tool active) the group LEDs show
+  // WHICH 16-step section is being viewed/edited, per section_led_level's ladder.
+  // Every other context shows the pattern bank (I/II) like the stock 606.
+  const bool section_ctx = (mode == PATTERN_WRITE) &&
+      (eng.running || (s_tool != TOOL_NONE && tool_uses_sections(s_tool)));
+  eng.SetGroupLed(section_ctx ? section_led_level(disp_section) : disp_group);
+  if (tools_ok && fnB.held())               frame = build_map_frame();
+  else if (tools_ok && s_tool != TOOL_NONE) frame = build_tool_frame(s_tool);
+  else                                      frame = build_frame(mode, inst);
 }

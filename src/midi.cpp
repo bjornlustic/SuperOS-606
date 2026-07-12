@@ -54,8 +54,13 @@ static constexpr uint8_t ACK_BAD_INDEX    = 2;
 static constexpr uint8_t ACK_BAD_LENGTH   = 3;
 
 // pack7 grows the payload by one MSB byte per 7 raw bytes
-static constexpr uint8_t PACKED_PATTERN = PATTERN_BYTES + (PATTERN_BYTES + 6) / 7;  // 21
-static constexpr uint8_t PACKED_TRACK   = TRACK_BYTES   + (TRACK_BYTES + 6) / 7;    // 75
+static constexpr uint8_t PACKED_PATTERN = PATTERN_BYTES + (PATTERN_BYTES + 6) / 7;
+static constexpr uint8_t PACKED_TRACK   = TRACK_BYTES   + (TRACK_BYTES + 6) / 7;
+// A 64-step pattern (140 raw / ~160 packed) is now larger than a track, so size
+// the shared send buffers to the larger of the two — otherwise a pattern dump
+// overruns a track-sized stack buffer.
+static constexpr uint8_t MAX_RAW    = PATTERN_BYTES  > TRACK_BYTES  ? PATTERN_BYTES  : TRACK_BYTES;
+static constexpr uint8_t MAX_PACKED = PACKED_PATTERN > PACKED_TRACK ? PACKED_PATTERN : PACKED_TRACK;
 
 // ---------------------------------------------------------------------------
 // 7-bit pack / unpack + checksum (bootloader scheme)
@@ -191,13 +196,15 @@ static void midi_send_version() {
 // 606 (step entry, tap write, chase-delete, length, scale). Tiny messages,
 // human-rate — fine to drop if the queue is somehow full.
 void midi_send_step_update(uint8_t pat, uint8_t inst, uint8_t step, bool on) {
+  // step is 0..63 (64-step patterns): mask to 7 bits, NOT 4 — & 0x0F reported
+  // the wrong step for anything past step 16.
   const uint8_t msg[8] = { 0xF0, SYX_MFR, CMD_STEP_UPDATE, (uint8_t)(pat & 0x1F),
-                           (uint8_t)(inst & 7), (uint8_t)(step & 0x0F), (uint8_t)(on ? 1 : 0), 0xF7 };
+                           (uint8_t)(inst & 7), (uint8_t)(step & 0x3F), (uint8_t)(on ? 1 : 0), 0xF7 };
   midi_tx_msg(msg, sizeof(msg));
 }
 void midi_send_length_update(uint8_t pat, uint8_t len) {
   const uint8_t msg[6] = { 0xF0, SYX_MFR, CMD_LENGTH_UPDATE, (uint8_t)(pat & 0x1F),
-                           (uint8_t)(len & 0x1F), 0xF7 };
+                           (uint8_t)(len & 0x7F), 0xF7 };   // 1..64 needs 7 bits
   midi_tx_msg(msg, sizeof(msg));
 }
 void midi_send_scale_update(uint8_t pat, uint8_t scale) {
@@ -208,7 +215,7 @@ void midi_send_scale_update(uint8_t pat, uint8_t scale) {
 
 // Build + queue a pattern or track dump: F0 7D <cmd> <idx> <xor_lo> <xor_hi> <packed> F7
 static bool send_dump(uint8_t cmd, uint8_t idx, const uint8_t *raw, uint8_t raw_len) {
-  uint8_t msg[7 + PACKED_TRACK];   // largest case: track dump, 82 bytes total
+  uint8_t msg[7 + MAX_PACKED];     // sized for the larger of pattern / track
   const uint8_t x = xor_bytes(raw, raw_len);
   msg[0] = 0xF0; msg[1] = SYX_MFR; msg[2] = cmd; msg[3] = idx;
   msg[4] = x & 0x7F; msg[5] = (uint8_t)((x >> 7) & 1);
@@ -229,10 +236,10 @@ void midi_send_pattern_dump(uint8_t pat) {
 }
 
 static void service_pending_dumps(Engine &eng) {
-  uint8_t raw[TRACK_BYTES];
+  uint8_t raw[MAX_RAW];
   for (uint8_t p = 0; p < NUM_PATTERNS && pending_pat_dumps; ++p) {
     if (!(pending_pat_dumps & ((uint32_t)1 << p))) continue;
-    serialize_pattern(eng.pattern[p], raw);
+    Pattern tmp; eng.ReadPattern(p, tmp); serialize_pattern(tmp, raw);
     if (!send_dump(CMD_PATTERN_DUMP, p, raw, PATTERN_BYTES)) return;   // queue full, retry next pass
     pending_pat_dumps &= ~((uint32_t)1 << p);
   }
@@ -247,8 +254,8 @@ static void service_pending_dumps(Engine &eng) {
 // ---------------------------------------------------------------------------
 // RX: SysEx capture + dispatch
 // ---------------------------------------------------------------------------
-// Largest inner message: push track = 7D + cmd + idx + 2 xor + 75 packed = 80.
-static uint8_t rx_buf[84];
+// Largest inner message: push pattern = 7D + cmd + idx + 2 xor + PACKED_PATTERN.
+static uint8_t rx_buf[5 + MAX_PACKED + 2];
 static uint8_t rx_len      = 0;
 static bool    rx_active   = false;   // between F0 and F7
 static bool    rx_overflow = false;
@@ -264,8 +271,8 @@ static void handle_push_pattern(Engine &eng) {
   if (!unpack7(rx_buf + 5, (uint8_t)(rx_len - 5), raw, PATTERN_BYTES)) { send_ack(ACK_BAD_LENGTH); return; }
   const uint8_t x = (uint8_t)(rx_buf[3] | (rx_buf[4] << 7));
   if (xor_bytes(raw, PATTERN_BYTES) != x) { send_ack(ACK_BAD_CHECKSUM); return; }
-  deserialize_pattern(eng.pattern[pat], raw);   // clamps length/scale
-  eng.mark_pat_dirty(pat);
+  Pattern tmp; deserialize_pattern(tmp, raw);   // clamps length/scale
+  eng.WritePattern(pat, tmp);                    // to cache (dirty) or flash/deferred
   save_pending = true;
   send_ack(ACK_OK);
 }

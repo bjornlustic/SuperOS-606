@@ -4,4 +4,7 @@
 .DS_Store
 .vscode/
 docs/
-
+# release artifacts ARE tracked (except with-ROM kits: the D650C mask ROM is
+# copyrighted and must never enter the repo)
+!release/**
+release/*-with-rom/

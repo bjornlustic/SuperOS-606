@@ -282,9 +282,11 @@
     .seq-grid-wrap { padding: 8px; overflow-x: auto; overflow-y: visible; -webkit-overflow-scrolling: touch; min-width: 0; max-width: 100%; }
 
     /* ── Drum grid ──
-       17 columns: row label + 16 step cells. Row 0 = step-number header.
-       Beat columns (steps 1, 5, 9, 13) get a heavy left rule, mirroring the
-       4-step groups silk-screened on the 606 panel. */
+       Row label + N step cells (N = pattern length rounded up to a 16-step
+       section: 16/32/48/64). renderGrid sets grid-template-columns inline;
+       the rule below is only the initial 16-step template. Beat columns get a
+       heavy left rule, mirroring the 4-step groups on the 606 panel; wider
+       grids scroll horizontally inside .seq-grid-wrap. */
     .drum-grid {
       display: grid; width: 100%; min-width: 560px; box-sizing: border-box;
       grid-template-columns: minmax(150px, 190px) repeat(16, minmax(25px, 1fr));
@@ -321,7 +323,7 @@
     .dg-name { font-size: 8px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--gray-4); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .dg-rowtools { display: flex; gap: 0; flex-shrink: 0; }
     .dg-tool {
-      width: 20px; height: 20px; border: var(--rule-sm); margin-right: -1px;
+      width: 18px; height: 20px; border: var(--rule-sm); margin-right: -1px;
       background: var(--white); color: var(--gray-3); font-size: 9px; font-weight: 900;
       cursor: pointer; font-family: var(--font); border-radius: 0; padding: 0;
       display: flex; align-items: center; justify-content: center;
@@ -329,6 +331,32 @@
     }
     .dg-tool:last-child { margin-right: 0; }
     .dg-tool:hover { background: var(--black); color: var(--white); }
+    /* per-row loop length stepper: [−] N [+], "add steps" like the master length */
+    .dg-lenwrap { display: flex; align-items: center; flex-shrink: 0; margin-left: 4px; }
+    .dg-lenbtn {
+      width: 16px; height: 20px; border: var(--rule-sm); margin-right: -1px; padding: 0;
+      background: var(--white); color: var(--black); font-size: 12px; font-weight: 900;
+      cursor: pointer; font-family: var(--font); border-radius: 0;
+      display: flex; align-items: center; justify-content: center; transition: all 0.08s;
+    }
+    .dg-lenbtn:hover { background: var(--black); color: var(--white); }
+    .dg-lennum {
+      min-width: 22px; height: 20px; border: var(--rule-sm); margin-right: -1px;
+      display: flex; align-items: center; justify-content: center;
+      font-family: var(--font); font-size: 10px; font-weight: 700; user-select: none;
+      background: var(--black); color: var(--white); cursor: pointer;
+    }
+    .dg-lennum.is-follow { background: var(--white); color: var(--gray-3); font-weight: 400; font-style: italic; }
+    /* per-row loop mode toggle: BAR (bar-reset) / POLY (free-running) */
+    .dg-poly {
+      min-width: 40px; height: 20px; margin-left: 5px; padding: 0 4px; flex-shrink: 0;
+      border: var(--rule-sm); border-radius: 0; background: var(--white);
+      font-family: var(--font); font-size: 8px; font-weight: 900; letter-spacing: 0.06em;
+      cursor: pointer; color: var(--gray-4); text-transform: uppercase;
+      display: flex; align-items: center; justify-content: center; transition: all 0.08s;
+    }
+    .dg-poly:hover { background: var(--gray-2); }
+    .dg-poly.is-set { background: var(--black); color: var(--white); }
 
     .dg-cell {
       height: 36px; min-width: 0;
@@ -345,7 +373,12 @@
     .dg-cell.dg-row-ac.is-on { background: var(--red); }
     .dg-cell.dg-row-ac.is-on:hover { background: #a50000; }
     .dg-cell.is-beyond { background: var(--gray-1); cursor: default; opacity: 0.45; }
-    .dg-cell.is-playing-col:not(.is-on) { background: rgba(204, 0, 0, 0.07); }
+    /* per-row playhead: red inset marker (visible on empty or active cells); a
+       polymeter row's playhead is blue so its free-running trace reads apart */
+    .dg-cell.is-playing-col { box-shadow: inset 3px 0 0 var(--red); }
+    .dg-cell.is-playing-col:not(.is-on) { background: rgba(204, 0, 0, 0.10); }
+    .dg-cell.is-playing-poly { box-shadow: inset 3px 0 0 #1668d6; }
+    .dg-cell.is-playing-poly:not(.is-on) { background: rgba(22, 104, 214, 0.12); }
 
     /* ── Collapsible panels (tracks / log) ── */
     .panel { border: var(--rule); margin-bottom: 6px; min-width: 0; max-width: 100%; }
@@ -592,7 +625,7 @@
       <div class="seq-toolbar-steps">
         <span class="seq-toolbar-lbl">Steps</span>
         <button class="len-adj-btn" id="patLenDec" title="Fewer steps">&#8722;</button>
-        <input type="number" id="patLen" class="seq-pat-len" min="1" max="16" value="16" />
+        <input type="number" id="patLen" class="seq-pat-len" min="1" max="64" value="16" />
         <button class="len-adj-btn" id="patLenInc" title="More steps">+</button>
       </div>
       <div class="seq-toolbar-steps" style="align-items:center;gap:4px">
@@ -674,19 +707,33 @@
   'use strict';
 
   // ── Constants ──────────────────────────────────────────────────────
-  // Pattern blob layout (matches the firmware's serialize_pattern, 18 bytes):
-  //   bytes  0..15  steps[8]   one uint16 little-endian step bitmap per
-  //                            instrument; bit n = step n+1 on. Row order is
-  //                            the INSTRUMENT-dial order: index 0 = the global
-  //                            ACCENT track, 1..7 = BD SD LT HT CY OH CH.
-  //   byte  16      length     1..16
-  //   byte  17      scale      0..3 (SCALE switch 1..4)
+  // Pattern blob layout (matches the firmware's serialize_pattern, 140 bytes).
+  // A pattern is up to 64 steps = 4 sections of 16; step s lives in section
+  // s>>4, bit s&15. Row order is the INSTRUMENT-dial order: index 0 = the
+  // global ACCENT track, 1..7 = BD SD LT HT CY OH CH.
+  //   bytes   0..63   steps[8][4]  one uint16 LE bitmap per (instrument,
+  //                                section): offset = (inst*4 + sec) * 2
+  //   byte   64       length       1..64
+  //   byte   65       scale        0..3 (SCALE switch 1..4)
+  //   byte   66       swing        0 = off .. 15 = max
+  //   byte   67       flam_type    0 = off, 1..3 = extra sub-hits
+  //   bytes  68..75   flam[4]      uint16 LE per section, bit = step flams
+  //   bytes  76..139  prob[64]     per-step play-chance level 0..3
+  //   bytes 140..147  ilen[8]      per-instrument loop length: 0 = follow the
+  //                                pattern length; 1..64 = the row loops its own
+  //                                length (mode per the poly bit below)
+  //   byte  148       poly         bit per instrument: 0 = the row restarts at
+  //                                every bar start (default); 1 = free-running
+  //                                polymeter (the loop carries across bars)
+  // The editor edits steps/length/row-length/row-mode/scale and PRESERVES
+  // swing/flam/prob bytes (the panel tools own those); they round-trip untouched.
   //
   // 32 patterns total: group I = 0..15, group II = 16..31 (absolute index =
   // group * 16 + pattern). A track is an ordered chain of up to 64 absolute
   // pattern indices, played end to end (8 tracks, INSTRUMENT dial 1-8).
-  var PATTERN_BYTES   = 18;
-  var MAX_STEPS       = 16;
+  var NUM_SECTIONS    = 4;
+  var STEP_BTNS       = 16;    // steps per section (one hardware grid page)
+  var MAX_STEPS       = 64;
   var NUM_INSTRUMENTS = 8;
   var NUM_GROUPS      = 2;     // pattern group I / II
   var PATS_PER_GROUP  = 16;
@@ -694,9 +741,12 @@
   var NUM_TRACKS      = 8;
   var TRACK_MAX_PATS  = 64;
   var TRACK_BYTES     = 65;    // len + 64 pattern indices
-  var LEN_OFF         = 16;
-  var SCALE_OFF       = 17;
-  var PACKED_PATTERN  = 21;    // pack7(18 bytes) -> 2 full chunks + 1 partial
+  var LEN_OFF         = 64;
+  var SCALE_OFF       = 65;
+  var ILEN_OFF        = 140;
+  var POLY_OFF        = 148;
+  var PATTERN_BYTES   = 149;
+  var PACKED_PATTERN  = PATTERN_BYTES + Math.ceil(PATTERN_BYTES / 7);  // 171
   var PACKED_TRACK    = 75;    // pack7(65 bytes) -> 9 full chunks + 1 partial
 
   // INSTRUMENT-dial order; MIDI notes match the firmware's INSTRUMENT_NOTE map.
@@ -803,23 +853,29 @@
   // ── Pattern blob helpers ───────────────────────────────────────────
   function makeBlankPat() {
     var b = new Uint8Array(PATTERN_BYTES);
-    b[LEN_OFF] = MAX_STEPS;
+    b[LEN_OFF] = STEP_BTNS;      // firmware's Clear() default: one 16-step bar
     b[SCALE_OFF] = 0;
     return b;
   }
-  function rowMask(blob, inst) {
-    return blob[2 * inst] | (blob[2 * inst + 1] << 8);
+  // Per-(instrument, section) 16-bit word, mirroring the firmware layout.
+  function secOff(inst, sec) { return (inst * NUM_SECTIONS + sec) * 2; }
+  function secMask(blob, inst, sec) {
+    var o = secOff(inst, sec);
+    return blob[o] | (blob[o + 1] << 8);
   }
-  function setRowMask(blob, inst, mask) {
-    blob[2 * inst]     = mask & 0xff;
-    blob[2 * inst + 1] = (mask >> 8) & 0xff;
+  function setSecMask(blob, inst, sec, mask) {
+    var o = secOff(inst, sec);
+    blob[o]     = mask & 0xff;
+    blob[o + 1] = (mask >> 8) & 0xff;
   }
+  // Absolute-step accessors, s = 0..63.
   function stepOn(blob, inst, s) {
-    return (rowMask(blob, inst) >> s) & 1;
+    return (secMask(blob, inst, s >> 4) >> (s & 15)) & 1;
   }
   function setStep(blob, inst, s, on) {
-    var m = rowMask(blob, inst);
-    setRowMask(blob, inst, on ? (m | (1 << s)) : (m & ~(1 << s)));
+    var sec = s >> 4, bit = 1 << (s & 15);
+    var m = secMask(blob, inst, sec);
+    setSecMask(blob, inst, sec, on ? (m | bit) : (m & ~bit));
   }
   function getLength(blob) {
     var l = blob[LEN_OFF] | 0;
@@ -830,25 +886,47 @@
   }
   function getScale(blob)    { return Math.min(3, blob[SCALE_OFF] | 0); }
   function setScale(blob, v) { blob[SCALE_OFF] = v & 3; }
+  // Per-instrument loop length: 0 = follow the pattern length.
+  function getInstLen(blob, inst) {
+    var l = blob[ILEN_OFF + inst] | 0;
+    return l > MAX_STEPS ? 0 : l;
+  }
+  function setInstLen(blob, inst, len) {
+    blob[ILEN_OFF + inst] = Math.min(MAX_STEPS, Math.max(0, len | 0));
+  }
+  // Row loop mode: false = restarts every bar (default), true = free-running polymeter.
+  function getInstPoly(blob, inst)     { return ((blob[POLY_OFF] >> inst) & 1) === 1; }
+  function setInstPoly(blob, inst, on) {
+    if (on) blob[POLY_OFF] |= (1 << inst); else blob[POLY_OFF] &= ~(1 << inst);
+  }
+  // Steps of this row that actually sound: its own loop if set. A bar-reset row
+  // is capped by the bar (steps past the pattern length are unreachable); a
+  // polymeter row cycles ALL its steps across bars, even past the bar.
+  function effInstLen(blob, inst) {
+    var il = getInstLen(blob, inst), pl = getLength(blob);
+    if (!il) return pl;
+    return getInstPoly(blob, inst) ? il : Math.min(il, pl);
+  }
   function patternEmpty(blob) {
-    for (var i = 0; i < NUM_INSTRUMENTS; i++) if (rowMask(blob, i)) return false;
+    for (var i = 0; i < NUM_INSTRUMENTS; i++)
+      for (var sec = 0; sec < NUM_SECTIONS; sec++)
+        if (secMask(blob, i, sec)) return false;
     return true;
   }
   /** Rotate one instrument row by +1/-1 step within the pattern length. */
   function rotateRow(blob, inst, dir) {
-    var len = getLength(blob);
-    var m = rowMask(blob, inst), out = 0;
-    for (var s = 0; s < len; s++) {
-      if ((m >> s) & 1) out |= 1 << (((s + dir) % len + len) % len);
-    }
-    setRowMask(blob, inst, (m & (~0 << len)) | out);
+    var len = getLength(blob), bits = [], s;
+    for (s = 0; s < len; s++) bits[(((s + dir) % len) + len) % len] = stepOn(blob, inst, s);
+    for (s = 0; s < len; s++) setStep(blob, inst, s, bits[s] ? 1 : 0);
   }
-  function clearRow(blob, inst) { setRowMask(blob, inst, 0); }
+  function clearRow(blob, inst) {
+    for (var sec = 0; sec < NUM_SECTIONS; sec++) setSecMask(blob, inst, sec, 0);
+  }
   function randomRow(blob, inst) {
-    var len = getLength(blob), m = 0;
+    clearRow(blob, inst);
+    var len = getLength(blob);
     for (var s = 0; s < len; s++)
-      if (Math.random() < RANDOM_DENSITY[inst]) m |= 1 << s;
-    setRowMask(blob, inst, m);
+      if (Math.random() < RANDOM_DENSITY[inst]) setStep(blob, inst, s, 1);
   }
   function cloneU8(u) { var x = new Uint8Array(u.length); x.set(u); return x; }
   function blobsEqual(a, b) {
@@ -914,6 +992,35 @@
       localStorage.setItem(LS_KEY, JSON.stringify(ser));
     } catch(e) { /* quota */ }
   }
+  // Migrate a legacy pattern blob to the 148-byte 64-step layout.
+  //   18 bytes (v0.3 original): steps[8] u16 + length + scale
+  //   38 bytes (interim):       + swing + prob[16] + flam u16 + flam_type
+  //  140 bytes (64-step, pre row-length): identical prefix, ilen[] added after
+  // Old steps land in section 0; everything else keeps its meaning.
+  function migratePat(arr) {
+    if (arr.length === PATTERN_BYTES) return new Uint8Array(arr);
+    if (arr.length === 140 || arr.length === 148) {   // earlier 64-step layouts: same prefix
+      var w = makeBlankPat();
+      for (var j = 0; j < arr.length; j++) w[j] = arr[j];
+      return w;
+    }
+    if (arr.length !== 18 && arr.length !== 38) return null;
+    var b = makeBlankPat();
+    for (var i = 0; i < NUM_INSTRUMENTS; i++) {
+      var o = secOff(i, 0);
+      b[o]     = arr[2 * i];
+      b[o + 1] = arr[2 * i + 1];
+    }
+    setLength(b, Math.min(STEP_BTNS, Math.max(1, arr[16] | 0)));
+    setScale(b, arr[17] & 3);
+    if (arr.length === 38) {
+      b[66] = arr[18] & 15;                                  // swing
+      for (var s = 0; s < 16; s++) b[76 + s] = arr[19 + s] & 3;  // prob -> section 0
+      b[68] = arr[35]; b[69] = arr[36];                      // flam -> section 0
+      b[67] = arr[37] & 3;                                   // flam_type
+    }
+    return b;
+  }
   function loadFromLS() {
     try {
       var raw = localStorage.getItem(LS_KEY);
@@ -924,8 +1031,10 @@
         if (!Array.isArray(ser.patterns[g]) || ser.patterns[g].length !== PATS_PER_GROUP) return false;
         for (var p = 0; p < PATS_PER_GROUP; p++) {
           var arr = ser.patterns[g][p];
-          if (!Array.isArray(arr) || arr.length !== PATTERN_BYTES) return false;
-          groups[g][p] = new Uint8Array(arr);
+          if (!Array.isArray(arr)) return false;
+          var mig = migratePat(arr);
+          if (!mig) return false;
+          groups[g][p] = mig;
         }
       }
       if (Array.isArray(ser.tracks)) {
@@ -1023,6 +1132,9 @@
   var clkRunning = false;
   var clkTick = -1;          // ticks since the last pattern-start anchor
   var playTicksPerStep = 6;  // chase rate, latched at each anchor (like the firmware's scale latch)
+  var absTick = 0;           // ticks since the run STARTED (never reset on the bar anchor)
+  var absStep = 0;           // free-running step count for polymeter rows (= absTick/ticksPerStep)
+  var absAnchored = false;   // absTick counts only after the first pattern-start anchor
   var autoSyncDone = false;  // full sync ran for the current port pair
   var deviceMode = null;     // null unknown, 'superos', or 'd650c' (from the version reply)
   var lastVersionSeen = '';  // de-dupes the version-poll log
@@ -1341,12 +1453,28 @@
     var blob = activeBlob();
     var len = getLength(blob);
 
+    // Column count follows the pattern length in whole 16-step sections, so a
+    // one-bar pattern looks exactly like the old editor and a 64-step pattern
+    // shows all four sections (horizontal scroll via .seq-grid-wrap). A
+    // polymeter row longer than the bar still needs its steps visible, so the
+    // widest row wins.
+    var maxLen = len;
+    for (var mi = 0; mi < NUM_INSTRUMENTS; mi++) {
+      var ml = effInstLen(blob, mi);
+      if (ml > maxLen) maxLen = ml;
+    }
+    var cols = Math.max(STEP_BTNS, Math.ceil(maxLen / STEP_BTNS) * STEP_BTNS);
+    var LBL = 232;   // row-label column width (fits abbr + tools + length + mode)
+    grid.style.gridTemplateColumns =
+      'minmax(' + LBL + 'px, ' + (LBL + 40) + 'px) repeat(' + cols + ', minmax(25px, 1fr))';
+    grid.style.minWidth = (LBL + 128 + (cols) * 27) + 'px';
+
     // header row: corner + step numbers with playhead dots
     var corner = document.createElement('div');
     corner.className = 'dg-corner';
     corner.textContent = 'Instrument';
     grid.appendChild(corner);
-    for (var s = 0; s < MAX_STEPS; s++) {
+    for (var s = 0; s < cols; s++) {
       var h = document.createElement('div');
       h.className = 'dg-head' + (s % 4 === 0 ? ' is-beat' : '') + (s >= len ? ' is-beyond' : '');
       h.dataset.s = s;
@@ -1387,17 +1515,69 @@
         })(inst, spec[2]));
         toolsEl.appendChild(tb);
       });
+      // per-row loop length: [−] N [+] stepper. Add/remove steps like the master
+      // length rather than typing a number. Grey italic N = following the pattern
+      // length; a solid N = this row's own loop. − at 1 returns to follow.
+      var rowIlen = getInstLen(blob, inst);      // 0 = follow
+      var lenWrap = document.createElement('div');
+      lenWrap.className = 'dg-lenwrap';
+      var lenDec = document.createElement('button');
+      lenDec.className = 'dg-lenbtn'; lenDec.textContent = '−';
+      lenDec.title = 'One fewer step for this row (at 1, returns to following the pattern length)';
+      var lenNum = document.createElement('div');
+      lenNum.className = 'dg-lennum' + (rowIlen ? '' : ' is-follow');
+      lenNum.textContent = rowIlen ? String(rowIlen) : String(len);
+      lenNum.title = rowIlen
+        ? 'This row loops ' + rowIlen + ' steps. Click to follow the pattern length again.'
+        : 'This row follows the pattern length (' + len + '). Use +/− to give it its own length.';
+      var lenInc = document.createElement('button');
+      lenInc.className = 'dg-lenbtn'; lenInc.textContent = '+';
+      lenInc.title = 'One more step for this row';
+      lenDec.addEventListener('click', (function(i) { return function() {
+        var b = activeBlob(), cur = getInstLen(b, i) || getLength(b);
+        setInstLen(b, i, cur - 1 < 1 ? 0 : cur - 1);   // below 1 -> follow
+        commitEdit(); syncToolbar(); renderGrid();
+      }; })(inst));
+      lenInc.addEventListener('click', (function(i) { return function() {
+        var b = activeBlob(), cur = getInstLen(b, i) || getLength(b);
+        setInstLen(b, i, Math.min(MAX_STEPS, cur + 1));
+        commitEdit(); syncToolbar(); renderGrid();
+      }; })(inst));
+      lenNum.addEventListener('click', (function(i) { return function() {
+        setInstLen(activeBlob(), i, 0);                 // click the readout = follow again
+        commitEdit(); syncToolbar(); renderGrid();
+      }; })(inst));
+      lenWrap.appendChild(lenDec); lenWrap.appendChild(lenNum); lenWrap.appendChild(lenInc);
+
+      // row loop mode: BAR (restart every bar, default) / POLY (free-running)
+      var polyBtn = document.createElement('button');
+      var isPoly = getInstPoly(blob, inst);
+      polyBtn.className = 'dg-poly' + (isPoly ? ' is-set' : '');
+      polyBtn.textContent = isPoly ? 'Poly' : 'Bar';
+      polyBtn.title = isPoly
+        ? 'Polymeter: this row’s loop free-runs across bars. Click for bar-reset.'
+        : 'Bar-reset: this row’s loop restarts at every bar start (default). Click for polymeter.';
+      polyBtn.addEventListener('click', (function(i) {
+        return function() {
+          setInstPoly(activeBlob(), i, !getInstPoly(activeBlob(), i));
+          commitEdit(); syncToolbar(); renderGrid();
+        };
+      })(inst));
+
       lbl.appendChild(abbr);
       lbl.appendChild(name);
       lbl.appendChild(toolsEl);
+      lbl.appendChild(lenWrap);
+      lbl.appendChild(polyBtn);
       grid.appendChild(lbl);
 
-      for (var st = 0; st < MAX_STEPS; st++) {
+      var rowEnd = effInstLen(blob, inst);   // steps of this row that sound
+      for (var st = 0; st < cols; st++) {
         var c = document.createElement('div');
         c.className = 'dg-cell'
           + (inst === 0 ? ' dg-row-ac' : '')
           + (st % 4 === 0 ? ' is-beat' : '')
-          + (st >= len ? ' is-beyond' : '')
+          + (st >= rowEnd ? ' is-beyond' : '')
           + (stepOn(blob, inst, st) ? ' is-on' : '')
           + (st === playingStep ? ' is-playing-col' : '');
         c.dataset.inst = inst;
@@ -1412,7 +1592,7 @@
     var inst = parseInt(el.dataset.inst, 10);
     var s = parseInt(el.dataset.s, 10);
     if (isNaN(inst) || isNaN(s)) return;
-    if (s >= getLength(activeBlob())) return;
+    if (s >= effInstLen(activeBlob(), inst)) return;   // beyond this row's own loop
     if (stepOn(activeBlob(), inst, s) === paint.value) return;
     setStep(activeBlob(), inst, s, paint.value);
     el.classList.toggle('is-on', !!paint.value);
@@ -1737,24 +1917,39 @@
       for (var s = 0; s < MAX_STEPS; s++) if (stepOn(blob, i, s)) arr.push(s + 1);
       steps[INSTRUMENTS[i].id] = arr;
     }
-    return {
+    var rowLengths = {}, rowPoly = [];
+    var anyRowLen = false;
+    for (var ri = 0; ri < NUM_INSTRUMENTS; ri++) {
+      var rl = getInstLen(blob, ri);
+      if (rl) { rowLengths[INSTRUMENTS[ri].id] = rl; anyRowLen = true; }
+      if (getInstPoly(blob, ri)) rowPoly.push(INSTRUMENTS[ri].id);
+    }
+    var out = {
       group: g + 1, pattern: p + 1,
       length: getLength(blob), scale: getScale(blob) + 1,
       steps: steps
     };
+    if (anyRowLen) out.rowLengths = rowLengths;   // only rows with their own loop
+    if (rowPoly.length) out.rowPoly = rowPoly;    // rows in free-running polymeter mode
+    return out;
   }
   function patternFromJSON(obj, blob) {
     blob.fill(0);
-    setLength(blob, (obj.length | 0) || MAX_STEPS);
+    setLength(blob, (obj.length | 0) || STEP_BTNS);   // default one 16-step bar
     var sc = (obj.scale | 0) - 1;
     setScale(blob, sc >= 0 && sc <= 3 ? sc : 0);
     for (var i = 0; i < NUM_INSTRUMENTS; i++) {
       var arr = obj.steps && obj.steps[INSTRUMENTS[i].id];
-      if (!Array.isArray(arr)) continue;
-      for (var k = 0; k < arr.length; k++) {
-        var s = (arr[k] | 0) - 1;
-        if (s >= 0 && s < MAX_STEPS) setStep(blob, i, s, 1);
+      if (Array.isArray(arr)) {
+        for (var k = 0; k < arr.length; k++) {
+          var s = (arr[k] | 0) - 1;
+          if (s >= 0 && s < MAX_STEPS) setStep(blob, i, s, 1);
+        }
       }
+      var rl = obj.rowLengths && obj.rowLengths[INSTRUMENTS[i].id];
+      if (rl) setInstLen(blob, i, rl | 0);
+      if (Array.isArray(obj.rowPoly) && obj.rowPoly.indexOf(INSTRUMENTS[i].id) >= 0)
+        setInstPoly(blob, i, true);
     }
   }
   function trackToJSON(t) {
@@ -2219,6 +2414,7 @@
       var sChanged = sAbs !== playingAbs;
       setPlayingPattern(sAbs, true);
       clkTick = 0;
+      if (!absAnchored) { absAnchored = true; absTick = 0; absStep = 0; }  // start free-run at the downbeat
       // the firmware latches the scale at each loop start, so the chase rate
       // latches here too — a mid-loop scale edit must not desync the playhead
       var sBlob = playingBlob();
@@ -2240,7 +2436,7 @@
 
     if (cmd === CMD_STEP_UPDATE && bytes.length >= 6) {
       // live panel edit on the 606: step entry, tap write, or chase-delete
-      var uPat = bytes[2] & 0x1f, uInst = bytes[3] & 7, uStep = bytes[4] & 0x0f, uOn = bytes[5] & 1;
+      var uPat = bytes[2] & 0x1f, uInst = bytes[3] & 7, uStep = bytes[4] & 0x3f, uOn = bytes[5] & 1;
       var ug = (uPat / PATS_PER_GROUP) | 0, up = uPat % PATS_PER_GROUP;
       setStep(groups[ug][up], uInst, uStep, uOn);
       if (ug === editGroup && up === activePat) {
@@ -2252,7 +2448,7 @@
     }
 
     if (cmd === CMD_LENGTH_UPDATE && bytes.length >= 4) {
-      var lPat = bytes[2] & 0x1f, lLen = bytes[3] & 0x1f;
+      var lPat = bytes[2] & 0x1f, lLen = bytes[3] & 0x7f;
       var lg = (lPat / PATS_PER_GROUP) | 0, lp = lPat % PATS_PER_GROUP;
       setLength(groups[lg][lp], lLen);
       if (lg === editGroup && lp === activePat) { syncToolbar(); renderGrid(); }
@@ -2338,13 +2534,31 @@
     playingStep = s;
     updatePlayheadUI();
   }
+  // Playhead column for one instrument row, matching the firmware: follow rows
+  // track the master step; bar-reset rows track masterStep % len (resets with the
+  // master each bar); polymeter rows track their own free-running counter and
+  // sweep their full length, past the master bar.
+  function rowPlayhead(blob, inst, masterStep) {
+    if (masterStep < 0) return -1;
+    var il = getInstLen(blob, inst);
+    if (!il) return masterStep;
+    if (getInstPoly(blob, inst)) return absStep % il;
+    return masterStep % il;
+  }
   function updatePlayheadUI() {
-    var showCol = (playingAbs === activeAbs() && clkRunning) ? playingStep : -1;
+    var active = (playingAbs === activeAbs() && clkRunning);
+    var blob = active ? activeBlob() : null;
+    var masterCol = active ? playingStep : -1;    // header dots follow the master bar
     document.querySelectorAll('.dg-head').forEach(function(h) {
-      h.classList.toggle('is-playing', parseInt(h.dataset.s, 10) === showCol);
+      h.classList.toggle('is-playing', parseInt(h.dataset.s, 10) === masterCol);
     });
     document.querySelectorAll('.dg-cell').forEach(function(c) {
-      c.classList.toggle('is-playing-col', parseInt(c.dataset.s, 10) === showCol);
+      var inst = parseInt(c.dataset.inst, 10), s = parseInt(c.dataset.s, 10);
+      var ph = blob ? rowPlayhead(blob, inst, masterCol) : -1;
+      var here = s === ph;
+      var poly = here && blob && getInstLen(blob, inst) && getInstPoly(blob, inst);
+      c.classList.toggle('is-playing-col', here && !poly);
+      c.classList.toggle('is-playing-poly', poly);
     });
   }
 
@@ -2352,18 +2566,24 @@
     if (b === 0xf8) {
       if (!clkRunning || clkTick < 0) return;
       clkTick++;
+      if (absAnchored) absTick++;               // free-run for polymeter rows
+      var prevAbs = absStep;
+      absStep = (absTick / playTicksPerStep) | 0;
       // length is live (matches the firmware) but the scale stays latched
       // (playTicksPerStep) until the next pattern-start anchor
       var blob = playingBlob();
       var len = blob ? getLength(blob) : MAX_STEPS;
-      setPlayingStep(((clkTick / playTicksPerStep) | 0) % len);
+      var ns = ((clkTick / playTicksPerStep) | 0) % len;
+      if (ns !== playingStep || absStep !== prevAbs) { playingStep = ns; updatePlayheadUI(); }
     } else if (b === 0xfa || b === 0xfb) {
       clkRunning = true;
       clkTick = -1;          // wait for the first 0x15 anchor
+      absTick = 0; absStep = 0; absAnchored = false;
       setPlayingStep(-1);
     } else if (b === 0xfc) {
       clkRunning = false;
       clkTick = -1;
+      absAnchored = false; absTick = 0; absStep = 0;
       setPlayingStep(-1);
       updatePlayheadUI();
     }
