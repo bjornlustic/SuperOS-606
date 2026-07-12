@@ -520,17 +520,6 @@
         <option value="1">Thru</option>
       </select></div>
     </div>
-    <div class="group">
-      <span class="lbl">Program Change test</span>
-      <div class="group-inner" style="gap:6px;flex-wrap:wrap">
-        <select id="pcSub" disabled title="Bank Select LSB (sub) = pattern group">
-          <option value="0">Group I</option>
-          <option value="1">Group II</option>
-        </select>
-        <select id="pcProg" disabled title="Program = pattern number"></select>
-        <button class="btn" id="btnPcSend" disabled title="Send Bank Select + Program Change so the 606 selects this pattern">Send PC</button>
-      </div>
-    </div>
   </div>
 
   <!-- Device transfer + JSON -->
@@ -1293,11 +1282,6 @@
       var o = document.createElement('option');
       o.value = String(c); o.textContent = 'Ch ' + c; ch.appendChild(o);
     }
-    var prog = document.getElementById('pcProg');
-    for (var p = 1; p <= PATS_PER_GROUP; p++) {
-      var po = document.createElement('option');
-      po.value = String(p); po.textContent = 'P' + p; prog.appendChild(po);
-    }
   }
 
   function requestSettings() {
@@ -1325,26 +1309,6 @@
     log('606 settings: channel ' + (chan === 0 ? 'Omni' : chan) +
         ', clock ' + (clk ? 'Internal/DIN' : 'MIDI sync') +
         ', out ' + (out ? 'Thru' : 'Out'), 'log-syx');
-  }
-
-  // Wire (0-based) channel the 606 listens on; Omni → channel 1 for the tester.
-  function currentWireChannel() {
-    var chan = +document.getElementById('setChannel').value;
-    return chan === 0 ? 0 : (chan - 1) & 0x0f;
-  }
-
-  // Program Change tester: Bank Select (sub = group) + Program Change, on raw
-  // channel messages — exactly what a DAW would send to pick a pattern.
-  function sendProgramChange() {
-    if (!midiOut) return;
-    var ch = currentWireChannel();
-    var sub = +document.getElementById('pcSub').value;     // 0 = group I, 1 = group II
-    var prog = +document.getElementById('pcProg').value;   // 1..16
-    midiOut.send([0xb0 | ch, 0x00, 0x00]);                 // Bank Select MSB = bank 1
-    midiOut.send([0xb0 | ch, 0x20, sub & 0x7f]);           // Bank Select LSB = sub / group
-    midiOut.send([0xc0 | ch, (prog - 1) & 0x7f]);          // Program Change = pattern
-    log('Program Change → ' + GROUP_NAMES[sub] + ' P' + prog +
-        ' (ch ' + (ch + 1) + ')', 'log-note');
   }
 
   // View-only, like the panel's PATTERN GROUP button: shows the other group's
@@ -1394,7 +1358,7 @@
     // meaningless while the 606 runs the D650C emulator).
     var ok = !!midiOut && !!midiIn && deviceMode !== 'd650c';
     ['btnReq','btnReqAll','btnSendPat','btnSendGroup','btnSendAll','btnTrkSend','btnTrkReq',
-     'setChannel','setClock','setOut','pcSub','pcProg','btnPcSend'].forEach(function(id) {
+     'setChannel','setClock','setOut'].forEach(function(id) {
       document.getElementById(id).disabled = !ok;
     });
     document.getElementById('btnUndo').disabled  = !canUndo(editGroup, activePat);
@@ -2766,7 +2730,6 @@
   document.getElementById('setChannel').addEventListener('change', sendSettings);
   document.getElementById('setClock').addEventListener('change', sendSettings);
   document.getElementById('setOut').addEventListener('change', sendSettings);
-  document.getElementById('btnPcSend').addEventListener('click', sendProgramChange);
 
   // Connect (and so auto-sync) without a click when the browser already
   // granted MIDI access on a previous visit — plugging in and opening the
