@@ -2415,9 +2415,10 @@
       // firmware build, 0x7F firmware without the emulator
       var rs = bytes[2];
       var el = document.getElementById('devRom');
-      var txt = rs === 0    ? 'D650C ROM: not on device'
-              : rs === 1    ? 'D650C ROM: on device'
-              : rs === 2    ? 'D650C ROM: built in'
+      // 1 (EEPROM upload) and 2 (embedded build) both mean the same thing to
+      // the user: the ROM is on the device. The wire keeps the distinction.
+      var txt = rs === 0               ? 'D650C ROM: not on device'
+              : (rs === 1 || rs === 2) ? 'D650C ROM: on device'
               : '';
       el.textContent = txt;
       el.className = (rs === 1 || rs === 2) ? 'is-ok' : (rs === 0 ? 'is-warn' : '');
