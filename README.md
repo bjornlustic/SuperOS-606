@@ -13,7 +13,8 @@ CPU, re-implementing the drum machine's sequencer in modern, readable C++.
 - **Track play / write** — the INSTRUMENT dial selects track 1-8
 - **Transport + 24 PPQN timing** read from the 606's own START/STOP flip-flop and TEMPO clock
 - **MIDI out** — clock / start / stop, plus a note per drum hit
-- **Flash persistence** — patterns survive power-off once `service-install.syx` is flashed
+- **Flash persistence** — patterns survive power-off; the SPM flash service ships
+  inside both release images (no separate install step)
 
 A companion web pattern editor (`tools/web-pattern-edit/`) sends/receives patterns over
 MIDI SysEx.
@@ -34,9 +35,10 @@ pio run -e app-debug     # app with USB serial + DEBUG for bench testing
 ```
 
 Outputs (git-ignored): `SuperOS-606_v*-full.hex` (app + bootloader + SPM flash
-service, for ISP) and `SuperOS-606_v*_<env>_<rev>.syx` (app only, for the MIDI
-SysEx bootloader). `service-install.syx` installs just the flash service over
-MIDI on a board that has the bootloader but lost the service.
+service, for ISP) and `SuperOS-606_v*_<env>_<rev>.syx` (app + flash service, for
+the MIDI SysEx bootloader). Both images carry the flash service, so one install
+is complete on its own; `service-install.syx` still exists for installing just
+the service on a board that has the bootloader but lost the service.
 
 ## Flashing
 
@@ -70,15 +72,16 @@ Two paths:
    Step LEDs 1-4 cycle while pages write; the unit boots the new app when the
    final EXECUTE message lands. If LEDs 1-4 blink together forever, a page
    checksum failed: power-cycle into the bootloader and send again with a
-   bigger delay (`-d 0.2`). SysEx flashing only rewrites the app pages, never
-   the bootloader, the service, or the EEPROM.
+   bigger delay (`-d 0.2`). SysEx flashing rewrites the app pages and refreshes
+   the flash service, never the bootloader or the EEPROM.
 
 ## Web pattern editor
 
 `tools/web-pattern-edit/index.html` is a single-file, dependency-free web editor for
-the 606's patterns and tracks: an 8×16 drum grid (the 7 voices + the global ACCENT
-row), both pattern groups, per-pattern length (1-16) and scale, track chains (8 × 64),
-a pattern library, undo/redo, and JSON save/load. Patterns live in the browser's
+the 606's patterns and tracks: a drum grid (the 7 voices + the global ACCENT row)
+that grows to the pattern length (up to 64 steps), both pattern groups, per-pattern
+length and scale, per-voice loop length with bar-reset/polymeter, per-step ratchets,
+track chains (8 × 64), a pattern library, undo/redo, and JSON save/load. Patterns live in the browser's
 local storage, so it also works fully offline as a scratchpad.
 
 With the 606 connected over MIDI the editor and the hardware stay in sync
@@ -102,8 +105,8 @@ With the 606 connected over MIDI the editor and the hardware stay in sync
   to the pattern's slot on the 606 either way.
 
 Pushed patterns land in RAM immediately and persist to flash at the next STOP
-(or after a short idle) — **only if the one-time `service-install.syx` setup
-above has been done**.
+(or after a short idle); the flash service that makes this work is part of the
+release images.
 
 Web MIDI needs Chrome/Edge and an HTTP origin (not `file://`):
 

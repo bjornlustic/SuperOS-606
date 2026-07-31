@@ -8,6 +8,11 @@ docs/
 # copyrighted and must never enter the repo)
 !release/**
 release/*-with-rom/
+# personal with-ROM kits, wherever they sit under release/: the msw folders,
+# their zips, any *with-rom* image, and the raw mask-ROM syx
+release/*msw*
+release/**/*with-rom*
+release/**/tr606-mask-rom*
 # personal ROM-embedded builds: generated header, copyrighted contents
 src/d650/rom_embed.h
 # (release/** negation above must not resurrect these)
