@@ -120,7 +120,7 @@ class Engine {
   uint8_t mute_mask  = 0;       // MUTE tool: bit per Instrument, 1 = muted (bit0 = accent)
   uint8_t global_len = 0;       // LENGTH tool: 0 = use each pattern's own length,
                                 //   1..16 = force this length on ALL patterns
-  // (SWING and FLAM are per pattern now — Pattern::swing / flam / flam_type.)
+  // (SWING and RATCHET are per pattern now — Pattern::swing / rstep / rval.)
 
   // RESLICE tool: while engaged, playback loops a window of the pattern.
   bool    reslice_on  = false;
@@ -220,7 +220,7 @@ class Engine {
     first_     = true;
     pp_back_   = false;
     reslice_on = false;
-    flam_rem_  = 0;
+    memset(rat_rem_, 0, sizeof(rat_rem_));
     arp_pos_   = 0;
     memset(poly_pos_, 0, sizeof(poly_pos_));  // polymeter rows start aligned
     rng_      ^= (uint32_t)micros() | 1u;   // stir the random-direction generator
@@ -240,7 +240,7 @@ class Engine {
     tick_      = 0;
     queue_len  = 0;   // a never-reached queued selection must not outlive the run
     reslice_on = false;
-    flam_rem_  = 0;
+    memset(rat_rem_, 0, sizeof(rat_rem_));
     arp_len    = 0;   // the arp must not outlive the run either
     arp_pos_   = 0;
   }
@@ -263,12 +263,17 @@ class Engine {
       tick_ = 1;
       return true;
     }
-    // FLAM: retrigger the step's voices at sub-step tick offsets (tempo-locked).
-    if (flam_rem_ && tick_ == flam_next_tick_) {
-      fire_pulse(flam_mask_, flam_accent_);
-      flam_rem_--;
-      flam_next_tick_ = (uint8_t)(flam_next_tick_ + flam_spacing_);
+    // RATCHET: retrigger each due voice at its sub-step tick offset (tempo-
+    // locked). Voices due on the same tick fire in one pulse.
+    uint8_t due = 0;
+    for (uint8_t i = 0; i < NUM_INSTRUMENTS; ++i) {
+      if (rat_rem_[i] && tick_ == rat_next_[i]) {
+        due |= (uint8_t)(1 << i);
+        rat_rem_[i]--;
+        rat_next_[i] = (uint8_t)(rat_next_[i] + rat_sp_[i]);
+      }
     }
+    if (due) fire_pulse(due, rat_accent_);
     if (++tick_ >= step_len_()) tick_ = 0;
     return false;
   }
@@ -495,6 +500,11 @@ class Engine {
   uint8_t fired() const { return fired_; }
   bool fired_accent() const { return fired_accent_; }
 
+  // True while a common-trigger pulse is driving the instrument-data lines.
+  // The pulse couples into the gated PA status sense (see hw.h col_us note),
+  // so the tempo-clock sampling in main.cpp blanks itself while this is set.
+  bool PulseActive() const { return pulse_on_; }
+
  private:
   uint8_t  tick_         = 0;
   uint8_t  pos_          = 0;     // position counter 0..length-1 (direction-agnostic)
@@ -552,12 +562,12 @@ class Engine {
     cache_dirty_ = false;
   }
 
-  // FLAM retrigger schedule (set in fire_step, serviced in ClockTick)
-  uint8_t  flam_mask_    = 0;
-  bool     flam_accent_  = false;
-  uint8_t  flam_rem_     = 0;     // extra hits remaining this step
-  uint8_t  flam_spacing_ = 0;     // ticks between sub-hits
-  uint8_t  flam_next_tick_ = 0;   // tick_ value of the next sub-hit
+  // RATCHET retrigger schedule (set in fire_step, serviced in ClockTick).
+  // Per voice, so each voice on a step ratchets on its own subdivision.
+  uint8_t  rat_rem_[NUM_INSTRUMENTS]  = {0};  // extra hits remaining this step
+  uint8_t  rat_sp_[NUM_INSTRUMENTS]   = {0};  // ticks between this voice's sub-hits
+  uint8_t  rat_next_[NUM_INSTRUMENTS] = {0};  // tick_ value of this voice's next sub-hit
+  bool     rat_accent_   = false;             // the step's accent, carried to sub-hits
   // RESLICE window
   uint8_t  reslice_start_ = 0;    // pos_ captured when reslice engaged
   uint8_t  reslice_off_   = 0;    // offset within the window
@@ -654,10 +664,12 @@ class Engine {
 
   void fire_step(uint8_t s) {
     const Pattern &p   = cur();
-    flam_rem_ = 0;
+    memset(rat_rem_, 0, sizeof(rat_rem_));
 
     uint8_t mask;
-    bool    accent;
+    bool    accent = false;
+    uint8_t sis[NUM_INSTRUMENTS];         // each row's effective step this tick
+    for (uint8_t i = 0; i < NUM_INSTRUMENTS; ++i) sis[i] = s;
 
     if (arp_len) {                        // ARP replaces the pattern
       const uint8_t a = arp[arp_pos_];
@@ -665,12 +677,6 @@ class Engine {
       mask   = (a >= INST_BD && a < NUM_INSTRUMENTS) ? (uint8_t)(1 << a) : 0;  // else = rest
       accent = false;
     } else {
-      // PROBABILITY: a level > 0 gives the whole step a chance to drop out
-      // (level 1 ~75% play .. level 3 ~25%). Level 0 always plays.
-      if (p.prob[s]) {
-        static const uint8_t thr[4] = { 255, 191, 127, 63 };
-        if (rng_u8() > thr[p.prob[s] & 3]) { fired_ = 0; fired_accent_ = false; return; }
-      }
       // Per-instrument loop length: a row with ilen set plays its own loop.
       // Two modes per row (Pattern::poly bit):
       //   bar-reset (default): step = s % ilen — the loop restarts at every
@@ -684,8 +690,25 @@ class Engine {
         const uint8_t li = p.ilen[i];
         uint8_t si = s;
         if (li) si = (uint8_t)(((p.poly >> i) & 1 ? poly_pos_[i] : s) % li);
+        sis[i] = si;
         if (i == INST_ACCENT) accent = p.step_get(i, si);
         else if (p.step_get(i, si)) mask |= (uint8_t)1 << i;
+      }
+      // PROBABILITY: a slot binding (voice, step) to v (1..15) makes that hit
+      // fire only v/16 of the time; steps without a slot always play. Slots
+      // match against the row's OWN effective step, so a looping row's prob
+      // follows its loop. Each hit rolls independently; a slot on the AC row
+      // thins the accent on that step.
+      for (uint8_t k = 0; k < PROB_SLOTS; ++k) {
+        if (p.pstep[k] == 0xFF) continue;
+        const uint8_t i = (uint8_t)(p.pval[k] >> 4);
+        const uint8_t v = (uint8_t)(p.pval[k] & 15);
+        if (p.pstep[k] != sis[i] || !v) continue;
+        const bool hit = (i == INST_ACCENT) ? accent : ((mask >> i) & 1);
+        if (hit && rng_u8() >= (uint8_t)(v << 4)) {
+          if (i == INST_ACCENT) accent = false;
+          else mask &= (uint8_t)~((uint8_t)1 << i);
+        }
       }
     }
 
@@ -696,19 +719,25 @@ class Engine {
     fired_        = mask;
     fired_accent_ = accent;
 
-    // FLAM: schedule this hit's voices to retrigger at sub-step ticks (not in arp).
-    // Spacing divides the ACTUAL step duration (step_len_ includes swing), so
-    // sub-hits always land inside the step — spacing off the nominal scale ticks
-    // let them spill past a swing-shortened step and vanish.
-    if (!arp_len && p.flam_get(s) && p.flam_type && mask) {
+    // RATCHET: schedule each firing voice to retrigger at sub-step ticks (not
+    // in arp). A slot binds (voice, step) to a count e (1..3): the voice fires e
+    // extra times, evenly spaced, for 2x/3x/4x. Spacing divides the ACTUAL step
+    // duration (step_len_ includes swing), so sub-hits always land inside the
+    // step — spacing off the nominal scale ticks let them spill past a swing-
+    // shortened step and vanish. Voices ratchet independently on their own
+    // effective step, so a looping row's ratchet follows its loop.
+    if (!arp_len && mask) {
       const uint8_t base = step_len_();
-      uint8_t e = p.flam_type; if (e > 3) e = 3;
-      uint8_t sp = (uint8_t)(base / (e + 1)); if (sp < 1) sp = 1;
-      flam_mask_      = mask;
-      flam_accent_    = accent;
-      flam_rem_       = e;
-      flam_spacing_   = sp;
-      flam_next_tick_ = sp;
+      rat_accent_ = accent;
+      for (uint8_t i = 0; i < NUM_INSTRUMENTS; ++i) {
+        if (!((mask >> i) & 1)) continue;
+        const uint8_t e = p.ratchet_get(i, sis[i]);   // 0 = single hit
+        if (!e) continue;
+        uint8_t sp = (uint8_t)(base / (e + 1)); if (sp < 1) sp = 1;
+        rat_rem_[i]  = e;
+        rat_sp_[i]   = sp;
+        rat_next_[i] = sp;
+      }
     }
 
     if (!mask && !accent) return;

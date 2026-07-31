@@ -56,20 +56,21 @@ static constexpr uint8_t ACK_BAD_CHECKSUM = 1;
 static constexpr uint8_t ACK_BAD_INDEX    = 2;
 static constexpr uint8_t ACK_BAD_LENGTH   = 3;
 
-// pack7 grows the payload by one MSB byte per 7 raw bytes
-static constexpr uint8_t PACKED_PATTERN = PATTERN_BYTES + (PATTERN_BYTES + 6) / 7;
-static constexpr uint8_t PACKED_TRACK   = TRACK_BYTES   + (TRACK_BYTES + 6) / 7;
-// A 64-step pattern (140 raw / ~160 packed) is now larger than a track, so size
-// the shared send buffers to the larger of the two — otherwise a pattern dump
-// overruns a track-sized stack buffer.
-static constexpr uint8_t MAX_RAW    = PATTERN_BYTES  > TRACK_BYTES  ? PATTERN_BYTES  : TRACK_BYTES;
-static constexpr uint8_t MAX_PACKED = PACKED_PATTERN > PACKED_TRACK ? PACKED_PATTERN : PACKED_TRACK;
+// pack7 grows the payload by one MSB byte per 7 raw bytes. A 64-step pattern
+// with per-voice ratchet is 236 raw / 270 packed, which is > 255: PACKED_* and
+// the pack/unpack indices below are 16-bit so the packed size never wraps.
+static constexpr uint16_t PACKED_PATTERN = PATTERN_BYTES + (PATTERN_BYTES + 6) / 7;
+static constexpr uint16_t PACKED_TRACK   = TRACK_BYTES   + (TRACK_BYTES + 6) / 7;
+// The pattern is larger than a track, so size the shared send buffers to the
+// larger of the two — otherwise a pattern dump overruns a track-sized buffer.
+static constexpr uint8_t  MAX_RAW    = PATTERN_BYTES  > TRACK_BYTES  ? PATTERN_BYTES  : TRACK_BYTES;
+static constexpr uint16_t MAX_PACKED = PACKED_PATTERN > PACKED_TRACK ? PACKED_PATTERN : PACKED_TRACK;
 
 // ---------------------------------------------------------------------------
 // 7-bit pack / unpack + checksum (bootloader scheme)
 // ---------------------------------------------------------------------------
-static uint8_t pack7(const uint8_t *src, uint8_t n, uint8_t *out) {
-  uint8_t oi = 0;
+static uint16_t pack7(const uint8_t *src, uint8_t n, uint8_t *out) {
+  uint16_t oi = 0;
   for (uint8_t i = 0; i < n; i += 7) {
     const uint8_t chunk = (uint8_t)((n - i < 7) ? (n - i) : 7);
     uint8_t msb = 0;
@@ -81,8 +82,8 @@ static uint8_t pack7(const uint8_t *src, uint8_t n, uint8_t *out) {
   return oi;
 }
 
-static bool unpack7(const uint8_t *in, uint8_t in_len, uint8_t *out, uint8_t out_len) {
-  uint8_t oi = 0, ii = 0;
+static bool unpack7(const uint8_t *in, uint16_t in_len, uint8_t *out, uint8_t out_len) {
+  uint8_t oi = 0; uint16_t ii = 0;
   while (oi < out_len) {
     if (ii >= in_len) return false;
     const uint8_t msb = in[ii++];
@@ -103,16 +104,17 @@ static uint8_t xor_bytes(const uint8_t *buf, uint8_t n) {
 // ---------------------------------------------------------------------------
 // TX: one ring buffer of complete messages
 // ---------------------------------------------------------------------------
-// Sized for a full track dump (82 bytes) plus a handful of note messages.
-static uint8_t  txq[192];
-static uint8_t  txq_head = 0, txq_tail = 0;   // ring indices
-static uint8_t  txq_count = 0;
+// Sized for a full pattern dump (270 packed -> 277-byte message) plus a handful
+// of note messages. Indices/count are 16-bit because the buffer exceeds 255.
+static uint8_t   txq[352];
+static uint16_t  txq_head = 0, txq_tail = 0;   // ring indices
+static uint16_t  txq_count = 0;
 
-bool midi_tx_msg(const uint8_t *msg, uint8_t len) {
-  if ((uint16_t)txq_count + len > sizeof(txq)) return false;   // full: drop whole message
-  for (uint8_t i = 0; i < len; ++i) {
+bool midi_tx_msg(const uint8_t *msg, uint16_t len) {
+  if ((uint16_t)(txq_count + len) > sizeof(txq)) return false;   // full: drop whole message
+  for (uint16_t i = 0; i < len; ++i) {
     txq[txq_tail] = msg[i];
-    txq_tail = (uint8_t)((txq_tail + 1) % sizeof(txq));
+    txq_tail = (uint16_t)((txq_tail + 1) % sizeof(txq));
   }
   txq_count += len;
 #ifdef SUPEROS_USB_MIDI
@@ -150,7 +152,7 @@ static void tx_pump() {
   int room = (int)Serial1.availableForWrite() - TX_RT_RESERVE;
   while (txq_count > 0 && room-- > 0) {
     Serial1.write(txq[txq_head]);
-    txq_head = (uint8_t)((txq_head + 1) % sizeof(txq));
+    txq_head = (uint16_t)((txq_head + 1) % sizeof(txq));
     txq_count--;
   }
 }
@@ -254,9 +256,9 @@ static bool send_dump(uint8_t cmd, uint8_t idx, const uint8_t *raw, uint8_t raw_
   const uint8_t x = xor_bytes(raw, raw_len);
   msg[0] = 0xF0; msg[1] = SYX_MFR; msg[2] = cmd; msg[3] = idx;
   msg[4] = x & 0x7F; msg[5] = (uint8_t)((x >> 7) & 1);
-  const uint8_t packed = pack7(raw, raw_len, msg + 6);
+  const uint16_t packed = pack7(raw, raw_len, msg + 6);
   msg[6 + packed] = 0xF7;
-  return midi_tx_msg(msg, (uint8_t)(7 + packed));
+  return midi_tx_msg(msg, (uint16_t)(7 + packed));
 }
 
 // Dump requests wait here until the TX queue has room (a request burst from
@@ -290,8 +292,8 @@ static void service_pending_dumps(Engine &eng) {
 // RX: SysEx capture + dispatch
 // ---------------------------------------------------------------------------
 // Largest inner message: push pattern = 7D + cmd + idx + 2 xor + PACKED_PATTERN.
-static uint8_t rx_buf[5 + MAX_PACKED + 2];
-static uint8_t rx_len      = 0;
+static uint8_t  rx_buf[5 + MAX_PACKED + 2];
+static uint16_t rx_len     = 0;
 static bool    rx_active   = false;   // between F0 and F7
 static bool    rx_overflow = false;
 static bool     save_pending = false;  // pushed data awaiting a flash save
@@ -303,7 +305,7 @@ static void handle_push_pattern(Engine &eng) {
   const uint8_t pat = rx_buf[2];
   if (pat >= NUM_PATTERNS) { send_ack(ACK_BAD_INDEX); return; }
   uint8_t raw[PATTERN_BYTES];
-  if (!unpack7(rx_buf + 5, (uint8_t)(rx_len - 5), raw, PATTERN_BYTES)) { send_ack(ACK_BAD_LENGTH); return; }
+  if (!unpack7(rx_buf + 5, (uint16_t)(rx_len - 5), raw, PATTERN_BYTES)) { send_ack(ACK_BAD_LENGTH); return; }
   const uint8_t x = (uint8_t)(rx_buf[3] | (rx_buf[4] << 7));
   if (xor_bytes(raw, PATTERN_BYTES) != x) { send_ack(ACK_BAD_CHECKSUM); return; }
   Pattern tmp; deserialize_pattern(tmp, raw);   // clamps length/scale
@@ -318,7 +320,7 @@ static void handle_push_track(Engine &eng) {
   const uint8_t trk = rx_buf[2];
   if (trk >= NUM_TRACKS) { send_ack(ACK_BAD_INDEX); return; }
   uint8_t raw[TRACK_BYTES];
-  if (!unpack7(rx_buf + 5, (uint8_t)(rx_len - 5), raw, TRACK_BYTES)) { send_ack(ACK_BAD_LENGTH); return; }
+  if (!unpack7(rx_buf + 5, (uint16_t)(rx_len - 5), raw, TRACK_BYTES)) { send_ack(ACK_BAD_LENGTH); return; }
   const uint8_t x = (uint8_t)(rx_buf[3] | (rx_buf[4] << 7));
   if (xor_bytes(raw, TRACK_BYTES) != x) { send_ack(ACK_BAD_CHECKSUM); return; }
   deserialize_track(eng.track[trk], raw);       // clamps len + pattern indices
@@ -341,7 +343,7 @@ static void handle_select(Engine &eng, uint8_t &disp_group) {
   // CMD_SELECT_CHAIN: 7D 1A <n> <p0..pn-1>
   if (rx_len < 3) return;
   const uint8_t n = rx_buf[2];
-  if (n < 1 || n > CHAIN_MAX || rx_len < 3 + n) return;
+  if (n < 1 || n > CHAIN_MAX || rx_len < (uint16_t)(3 + n)) return;
   uint8_t pats[CHAIN_MAX];
   for (uint8_t i = 0; i < n; ++i) {
     pats[i] = rx_buf[3 + i];

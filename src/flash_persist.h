@@ -51,7 +51,10 @@ inline bool flash_persist_begin() {
 inline bool flash_pat_read(uint8_t idx, Pattern &out) {
   if (!g_flash_ok) return false;
   uint8_t buf[FE_MAX_PAYLOAD];
-  if (g_flash.read(FB_PATTERN_BASE + idx, buf, PATTERN_BYTES) != PATTERN_BYTES) return false;
+  // Cap at the full buffer, not PATTERN_BYTES: read() clamps to the cap, so a
+  // longer record from an OLD format would otherwise clamp to exactly
+  // PATTERN_BYTES and load truncated garbage instead of being rejected.
+  if (g_flash.read(FB_PATTERN_BASE + idx, buf, sizeof(buf)) != PATTERN_BYTES) return false;
   deserialize_pattern(out, buf);
   return true;
 }

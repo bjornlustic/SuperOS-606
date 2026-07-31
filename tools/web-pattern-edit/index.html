@@ -142,6 +142,27 @@
     }
     .scale-btn:hover { background: var(--gray-2); }
     .scale-btn.btn-primary { background: var(--black); color: var(--white); border-color: var(--black); }
+    .mode-btn {
+      height: 30px; padding: 0 12px; background: var(--white);
+      border: var(--rule-sm); color: var(--black); font-family: var(--font);
+      font-size: 9px; font-weight: 900; letter-spacing: 0.12em;
+      text-transform: uppercase; cursor: pointer; border-radius: 0;
+      transition: background 0.08s, color 0.08s;
+    }
+    .mode-btn:hover { background: var(--gray-2); }
+    .mode-btn.btn-primary { background: var(--black); color: var(--white); border-color: var(--black); }
+    /* ratchet count badge inside a grid cell */
+    .dg-rat {
+      position: absolute; inset: 0; display: flex; align-items: center;
+      justify-content: center; font-size: 11px; font-weight: 900;
+      letter-spacing: 0.02em; color: var(--black); pointer-events: none;
+    }
+    .dg-cell.is-on .dg-rat { color: var(--white); }
+    .dg-cell.dg-row-ac.is-on .dg-rat { color: var(--white); }
+    /* ratchet edit mode: cells show a pointer; the AC row is inert */
+    .drum-grid.is-ratchet-mode .dg-cell { cursor: pointer; }
+    .drum-grid.is-ratchet-mode .dg-cell.dg-row-ac { cursor: default; opacity: 0.5; }
+    .drum-grid.is-ratchet-mode .dg-cell.has-rat:not(.is-on) { background: var(--gray-2); }
 
     /* ── MIDI status ── */
     #midiStatus { font-size: 11px; font-weight: 600; color: var(--gray-3); letter-spacing: 0.02em; padding-left: 8px; }
@@ -629,10 +650,20 @@
         <button class="scale-btn" data-scale="2" title="Scale 3: 8th-note triplets (8 clock ticks per step)">3 &middot; 8 Trip</button>
         <button class="scale-btn" data-scale="3" title="Scale 4: 16th-note triplets (4 clock ticks per step)">4 &middot; 16 Trip</button>
       </div>
-      <span class="seq-hint">
+      <div class="seq-toolbar-steps" style="align-items:center;gap:4px">
+        <span class="seq-toolbar-lbl" style="margin-right:4px">Edit</span>
+        <button class="mode-btn btn-primary" id="modeSteps" title="Paint steps on/off">Steps</button>
+        <button class="mode-btn" id="modeRatchet" title="Set per-step retrigger: 2x / 3x / 4x">Ratchet</button>
+      </div>
+      <span class="seq-hint" id="seqHintSteps">
         click / drag paints steps &nbsp;&mdash;&nbsp; <b>AC</b> = global accent for the whole step
         &nbsp;&middot;&nbsp; row tools: <b>&#8592;</b> <b>&#8594;</b> rotate &nbsp;<b>R</b> random &nbsp;<b>&#10005;</b> clear
         &nbsp;&mdash;&nbsp; drag across pattern pills = chain &nbsp;&mdash;&nbsp; red dot = playing step
+      </span>
+      <span class="seq-hint" id="seqHintRatchet" style="display:none">
+        click a cell to cycle its retrigger: none &#8594; <b>&times;2</b> &#8594; <b>&times;3</b> &#8594; <b>&times;4</b> &#8594; none
+        &nbsp;&mdash;&nbsp; per instrument, per step &nbsp;&middot;&nbsp; 16 ratchets max per pattern
+        &nbsp;&middot;&nbsp; the <b>AC</b> row can't ratchet
       </span>
     </div>
     <div class="seq-grid-wrap">
@@ -701,7 +732,7 @@
   'use strict';
 
   // ── Constants ──────────────────────────────────────────────────────
-  // Pattern blob layout (matches the firmware's serialize_pattern, 140 bytes).
+  // Pattern blob layout (matches the firmware's serialize_pattern, 236 bytes).
   // A pattern is up to 64 steps = 4 sections of 16; step s lives in section
   // s>>4, bit s&15. Row order is the INSTRUMENT-dial order: index 0 = the
   // global ACCENT track, 1..7 = BD SD LT HT CY OH CH.
@@ -710,17 +741,24 @@
   //   byte   64       length       1..64
   //   byte   65       scale        0..3 (SCALE switch 1..4)
   //   byte   66       swing        0 = off .. 15 = max
-  //   byte   67       flam_type    0 = off, 1..3 = extra sub-hits
-  //   bytes  68..75   flam[4]      uint16 LE per section, bit = step flams
-  //   bytes  76..139  prob[64]     per-step play-chance level 0..3
-  //   bytes 140..147  ilen[8]      per-instrument loop length: 0 = follow the
+  //   bytes  67..82   rstep[16]    ratchet slot table, slot's step 0..63;
+  //                                0xFF = slot free. A slot binds (instrument,
+  //                                step) to a count v (1..3): that hit fires v
+  //                                extra times evenly spaced (2x/3x/4x).
+  //   bytes  83..98   rval[16]     slot's (instrument << 4) | count 1..3
+  //   bytes  99..162  pstep[64]    probability slot table, slot's step 0..63;
+  //                                0xFF = slot free. A slot binds (instrument,
+  //                                step) to a chance v: that hit fires v/16 of
+  //                                the time; steps without a slot always play.
+  //   bytes 163..226  pval[64]     slot's (instrument << 4) | chance 1..15
+  //   bytes 227..234  ilen[8]      per-instrument loop length: 0 = follow the
   //                                pattern length; 1..64 = the row loops its own
   //                                length (mode per the poly bit below)
-  //   byte  148       poly         bit per instrument: 0 = the row restarts at
+  //   byte  235       poly         bit per instrument: 0 = the row restarts at
   //                                every bar start (default); 1 = free-running
   //                                polymeter (the loop carries across bars)
   // The editor edits steps/length/row-length/row-mode/scale and PRESERVES
-  // swing/flam/prob bytes (the panel tools own those); they round-trip untouched.
+  // swing/ratchet/prob bytes (the panel tools own those); they round-trip untouched.
   //
   // 32 patterns total: group I = 0..15, group II = 16..31 (absolute index =
   // group * 16 + pattern). A track is an ordered chain of up to 64 absolute
@@ -737,10 +775,17 @@
   var TRACK_BYTES     = 65;    // len + 64 pattern indices
   var LEN_OFF         = 64;
   var SCALE_OFF       = 65;
-  var ILEN_OFF        = 140;
-  var POLY_OFF        = 148;
-  var PATTERN_BYTES   = 149;
-  var PACKED_PATTERN  = PATTERN_BYTES + Math.ceil(PATTERN_BYTES / 7);  // 171
+  var SWING_OFF       = 66;
+  var RATCHET_SLOTS   = 16;
+  var RSTEP_OFF       = 67;
+  var RVAL_OFF        = 83;
+  var PROB_SLOTS      = 64;
+  var PSTEP_OFF       = 99;
+  var PVAL_OFF        = 163;
+  var ILEN_OFF        = 227;
+  var POLY_OFF        = 235;
+  var PATTERN_BYTES   = 236;
+  var PACKED_PATTERN  = PATTERN_BYTES + Math.ceil(PATTERN_BYTES / 7);  // 270
   var PACKED_TRACK    = 75;    // pack7(65 bytes) -> 9 full chunks + 1 partial
 
   // INSTRUMENT-dial order; MIDI notes match the firmware's INSTRUMENT_NOTE map.
@@ -770,7 +815,7 @@
   //
   //   editor -> 606
   //     F0 7D 10 <pat 0-31> F7                                request pattern
-  //     F0 7D 12 <pat> <xor_lo> <xor_hi> <21B packed> F7      push pattern
+  //     F0 7D 12 <pat> <xor_lo> <xor_hi> <270B packed> F7      push pattern
   //     F0 7D 1A <n 1-16> <p0..pn-1> F7                       select range chain
   //     F0 7D 1D <pat 0-31> F7                                select pattern
   //     F0 7D 24 <trk 0-7> F7                                 request track
@@ -778,7 +823,7 @@
   //     F0 7D 30 F7                                           request settings
   //     F0 7D 32 <chan 0-16> <clk 0-1> <out 0-1> F7           set settings
   //   606 -> editor
-  //     F0 7D 11 <pat> <xor_lo> <xor_hi> <21B packed> F7      pattern dump
+  //     F0 7D 11 <pat> <xor_lo> <xor_hi> <270B packed> F7      pattern dump
   //     F0 7D 14 <status> F7                                  push ack
   //     F0 7D 15 <pat 0-31> F7                                pattern-start anchor (running)
   //     F0 7D 1E <pat 0-31> F7                                selected pattern (stopped / on stop)
@@ -852,6 +897,8 @@
     var b = new Uint8Array(PATTERN_BYTES);
     b[LEN_OFF] = STEP_BTNS;      // firmware's Clear() default: one 16-step bar
     b[SCALE_OFF] = 0;
+    b.fill(0xff, RSTEP_OFF, RSTEP_OFF + RATCHET_SLOTS); // all ratchet slots free
+    b.fill(0xff, PSTEP_OFF, PSTEP_OFF + PROB_SLOTS);    // all prob slots free
     return b;
   }
   // Per-(instrument, section) 16-bit word, mirroring the firmware layout.
@@ -895,6 +942,32 @@
   function getInstPoly(blob, inst)     { return ((blob[POLY_OFF] >> inst) & 1) === 1; }
   function setInstPoly(blob, inst, on) {
     if (on) blob[POLY_OFF] |= (1 << inst); else blob[POLY_OFF] &= ~(1 << inst);
+  }
+  // Ratchet slots: sparse (instrument, step) -> count (1..3 = 2x/3x/4x), 16 per
+  // pattern. Mirrors the firmware's Pattern::ratchet_get/set. get returns 0 when
+  // a step has no ratchet; set(v=0) frees the slot; set returns false only when
+  // the 16-slot table is full.
+  function ratchetGet(blob, inst, s) {
+    for (var k = 0; k < RATCHET_SLOTS; k++)
+      if (blob[RSTEP_OFF + k] === s && (blob[RVAL_OFF + k] >> 4) === inst)
+        return blob[RVAL_OFF + k] & 15;
+    return 0;
+  }
+  function ratchetSet(blob, inst, s, v) {
+    if (v > 3) v = 3;
+    var freeK = -1;
+    for (var k = 0; k < RATCHET_SLOTS; k++) {
+      if (blob[RSTEP_OFF + k] === s && (blob[RVAL_OFF + k] >> 4) === inst) {
+        if (v) blob[RVAL_OFF + k] = (inst << 4) | v; else blob[RSTEP_OFF + k] = 0xff;
+        return true;
+      }
+      if (blob[RSTEP_OFF + k] === 0xff && freeK < 0) freeK = k;
+    }
+    if (!v) return true;
+    if (freeK < 0) return false;              // table full (16 ratchets/pattern)
+    blob[RSTEP_OFF + freeK] = s;
+    blob[RVAL_OFF + freeK]  = (inst << 4) | v;
+    return true;
   }
   // Steps of this row that actually sound: its own loop if set. A bar-reset row
   // is capped by the bar (steps past the pattern length are unreachable); a
@@ -989,17 +1062,44 @@
       localStorage.setItem(LS_KEY, JSON.stringify(ser));
     } catch(e) { /* quota */ }
   }
-  // Migrate a legacy pattern blob to the 148-byte 64-step layout.
+  // Migrate a legacy pattern blob to the 236-byte ratchet-slot layout.
   //   18 bytes (v0.3 original): steps[8] u16 + length + scale
   //   38 bytes (interim):       + swing + prob[16] + flam u16 + flam_type
-  //  140 bytes (64-step, pre row-length): identical prefix, ilen[] added after
-  // Old steps land in section 0; everything else keeps its meaning.
+  //  140/148/149 bytes (64-step layouts with per-step prob[64] at 76..139,
+  //               then ilen[8] at 140 and poly at 148 as they were added)
+  //   93 bytes (interim per-instrument prob[8] at 76, ilen at 84, poly at 92)
+  //  213 bytes (previous release: flam_type at 67 + flam[4] at 68..75, then
+  //               prob slots at 76..203, ilen at 204, poly at 212)
+  // Old steps land in section 0. The whole-step flam and the old prob encodings
+  // have no ratchet/slot equivalent, so migration drops them (everything plays
+  // once, at 100%); everything else keeps its meaning.
   function migratePat(arr) {
     if (arr.length === PATTERN_BYTES) return new Uint8Array(arr);
-    if (arr.length === 140 || arr.length === 148) {   // earlier 64-step layouts: same prefix
+    if (arr.length === 213) {                             // previous release layout
+      var w2 = makeBlankPat();
+      for (var j2 = 0; j2 < 67; j2++) w2[j2] = arr[j2];   // steps + length + scale + swing
+      for (var k2 = 0; k2 < PROB_SLOTS; k2++) {           // prob slots 76..203 -> 99..226
+        w2[PSTEP_OFF + k2] = arr[76 + k2];
+        w2[PVAL_OFF + k2]  = arr[140 + k2];
+      }
+      for (var m2 = 0; m2 < NUM_INSTRUMENTS; m2++) w2[ILEN_OFF + m2] = arr[204 + m2];
+      w2[POLY_OFF] = arr[212];
+      return w2;
+    }
+    if (arr.length === 140 || arr.length === 148 || arr.length === 149) {
       var w = makeBlankPat();
-      for (var j = 0; j < arr.length; j++) w[j] = arr[j];
+      for (var j = 0; j < 67; j++) w[j] = arr[j];       // steps + length + scale + swing
+      if (arr.length >= 148)
+        for (var k = 0; k < NUM_INSTRUMENTS; k++) w[ILEN_OFF + k] = arr[140 + k];
+      if (arr.length >= 149) w[POLY_OFF] = arr[148];
       return w;
+    }
+    if (arr.length === 93) {
+      var w9 = makeBlankPat();
+      for (var j9 = 0; j9 < 67; j9++) w9[j9] = arr[j9]; // steps + length + scale + swing
+      for (var k9 = 0; k9 < NUM_INSTRUMENTS; k9++) w9[ILEN_OFF + k9] = arr[84 + k9];
+      w9[POLY_OFF] = arr[92];
+      return w9;
     }
     if (arr.length !== 18 && arr.length !== 38) return null;
     var b = makeBlankPat();
@@ -1010,12 +1110,7 @@
     }
     setLength(b, Math.min(STEP_BTNS, Math.max(1, arr[16] | 0)));
     setScale(b, arr[17] & 3);
-    if (arr.length === 38) {
-      b[66] = arr[18] & 15;                                  // swing
-      for (var s = 0; s < 16; s++) b[76 + s] = arr[19 + s] & 3;  // prob -> section 0
-      b[68] = arr[35]; b[69] = arr[36];                      // flam -> section 0
-      b[67] = arr[37] & 3;                                   // flam_type
-    }
+    if (arr.length === 38) b[SWING_OFF] = arr[18] & 15;    // swing (flam dropped)
     return b;
   }
   function loadFromLS() {
@@ -1418,6 +1513,18 @@
 
   // ── Drum grid ──────────────────────────────────────────────────────
   var paint = { active: false, value: 0, touched: false };
+  var editMode = 'steps';   // 'steps' = paint on/off, 'ratchet' = cycle 2x/3x/4x
+
+  function setEditMode(m) {
+    editMode = m;
+    document.getElementById('modeSteps').classList.toggle('btn-primary', m === 'steps');
+    document.getElementById('modeRatchet').classList.toggle('btn-primary', m === 'ratchet');
+    document.getElementById('seqHintSteps').style.display   = m === 'steps'   ? '' : 'none';
+    document.getElementById('seqHintRatchet').style.display = m === 'ratchet' ? '' : 'none';
+    renderGrid();
+  }
+  document.getElementById('modeSteps').addEventListener('click', function() { setEditMode('steps'); });
+  document.getElementById('modeRatchet').addEventListener('click', function() { setEditMode('ratchet'); });
 
   function cellEl(inst, s) {
     return document.querySelector('.dg-cell[data-inst="' + inst + '"][data-s="' + s + '"]');
@@ -1426,6 +1533,7 @@
   function renderGrid() {
     var grid = document.getElementById('drumGrid');
     grid.innerHTML = '';
+    grid.classList.toggle('is-ratchet-mode', editMode === 'ratchet');
     var blob = activeBlob();
     var len = getLength(blob);
 
@@ -1549,15 +1657,24 @@
 
       var rowEnd = effInstLen(blob, inst);   // steps of this row that sound
       for (var st = 0; st < cols; st++) {
+        var rat = inst === 0 ? 0 : ratchetGet(blob, inst, st);   // AC row never ratchets
         var c = document.createElement('div');
         c.className = 'dg-cell'
           + (inst === 0 ? ' dg-row-ac' : '')
           + (st % 4 === 0 ? ' is-beat' : '')
           + (st >= rowEnd ? ' is-beyond' : '')
           + (stepOn(blob, inst, st) ? ' is-on' : '')
+          + (rat ? ' has-rat' : '')
           + (st === playingStep ? ' is-playing-col' : '');
         c.dataset.inst = inst;
         c.dataset.s = st;
+        // Show the retrigger count in ratchet mode (x2/x3/x4).
+        if (editMode === 'ratchet' && rat) {
+          var badge = document.createElement('span');
+          badge.className = 'dg-rat';
+          badge.textContent = '×' + (rat + 1);   // count 1..3 -> x2..x4
+          c.appendChild(badge);
+        }
         grid.appendChild(c);
       }
     }
@@ -1577,11 +1694,29 @@
     // (the firmware still one-shot-triggers MIDI Note Ons, for pads/DAWs)
   }
 
+  // Ratchet mode: a click cycles the cell's retrigger none -> 2x -> 3x -> 4x ->
+  // none. No drag (unlike step painting) — each click is one step of the cycle.
+  function cycleRatchet(inst, s) {
+    if (inst === 0) return;                            // AC row can't ratchet
+    var blob = activeBlob();
+    if (s >= effInstLen(blob, inst)) return;           // beyond this row's loop
+    var cur = ratchetGet(blob, inst, s);
+    var next = (cur + 1) % 4;                           // 0->1->2->3->0
+    if (next && !ratchetSet(blob, inst, s, next)) {     // adding, table full
+      showErrorToast('Pattern is full (16 ratchets max)');
+      return;
+    }
+    if (!next) ratchetSet(blob, inst, s, 0);            // clear
+    commitEdit();
+    renderGrid();
+  }
+
   document.getElementById('drumGrid').addEventListener('pointerdown', function(e) {
     var el = e.target.closest('.dg-cell');
     if (!el || el.classList.contains('is-beyond')) return;
     var inst = parseInt(el.dataset.inst, 10);
     var s = parseInt(el.dataset.s, 10);
+    if (editMode === 'ratchet') { cycleRatchet(inst, s); e.preventDefault(); return; }
     paint.active = true;
     paint.value = stepOn(activeBlob(), inst, s) ? 0 : 1;
     paint.touched = false;
@@ -1911,6 +2046,8 @@
   }
   function patternFromJSON(obj, blob) {
     blob.fill(0);
+    blob.fill(0xff, RSTEP_OFF, RSTEP_OFF + RATCHET_SLOTS); // all ratchet slots free
+    blob.fill(0xff, PSTEP_OFF, PSTEP_OFF + PROB_SLOTS);   // all prob slots free
     setLength(blob, (obj.length | 0) || STEP_BTNS);   // default one 16-step bar
     var sc = (obj.scale | 0) - 1;
     setScale(blob, sc >= 0 && sc <= 3 ? sc : 0);

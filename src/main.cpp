@@ -13,7 +13,7 @@
 //   - FUNCTION is the tool gateway (PATTERN WRITE only): hold FUNCTION = tool
 //     map on the step LEDs, FUNCTION + step = enter that tool, tap FUNCTION =
 //     exit. Tools: length (per-pattern + GROUP-chord global), scale + swing,
-//     copy/paste/clear, transform, accent, probability, flam, mute, reslice,
+//     copy/paste/clear, transform, accent, probability, ratchet, mute, reslice,
 //     arp, direction, pattern-gen, save. FUNCTION + CLEAR = config menu (any
 //     mode). Pattern length and scale live in their tools now.
 //   - 64-step patterns: 4 sections of 16. GROUP pages sections (running, or a
@@ -158,6 +158,10 @@ static uint8_t s_scale_ref    = 0xFF;   // SCALE position at tool entry: tools t
                                         // so entering a tool never silently applies
                                         // whatever position the switch happens to sit at
 static bool    s_grp_used     = false;  // GROUP was chorded with a step inside a tool
+static uint8_t s_prob_sel     = 0xFF;   // PROB tool: absolute step being edited
+                                        // (flashing); 0xFF = picking a step
+static uint8_t s_ratchet_sel  = 0xFF;   // RATCHET tool: absolute step being edited
+                                        // (flashing); 0xFF = picking a step
 static uint32_t s_fn_up_ms    = 0;      // millis() of the last FUNCTION release: step
                                         // presses shortly after are swallowed, so a
                                         // late tool-map press can't fall through and
@@ -171,7 +175,7 @@ static constexpr uint8_t GSHARP_STEP = 8;   // step 9: reboots into the D650C em
 enum {
   TOOL_NONE = 0,
   TOOL_LENGTH = 1, TOOL_SCALE = 2, TOOL_COPY = 3, TOOL_XFORM = 4,
-  TOOL_ACCENT = 5, TOOL_PROB = 6, TOOL_FLAM = 7, TOOL_POLY = 8,
+  TOOL_ACCENT = 5, TOOL_PROB = 6, TOOL_RATCHET = 7, TOOL_POLY = 8,
   TOOL_MUTE = 9, TOOL_RESLICE = 10, TOOL_ARP = 11, TOOL_DIR = 12,
   TOOL_GEN = 13, TOOL_SAVE = 14,
 };
@@ -180,7 +184,7 @@ static constexpr uint16_t TOOLS_IMPLEMENTED =
   (1u << (TOOL_LENGTH - 1)) | (1u << (TOOL_SCALE   - 1)) |
   (1u << (TOOL_COPY   - 1)) | (1u << (TOOL_XFORM   - 1)) |
   (1u << (TOOL_ACCENT - 1)) | (1u << (TOOL_PROB    - 1)) |
-  (1u << (TOOL_FLAM   - 1)) | (1u << (TOOL_POLY    - 1)) |
+  (1u << (TOOL_RATCHET   - 1)) | (1u << (TOOL_POLY    - 1)) |
   (1u << (TOOL_MUTE   - 1)) | (1u << (TOOL_RESLICE - 1)) |
   (1u << (TOOL_ARP    - 1)) | (1u << (TOOL_DIR     - 1)) |
   (1u << (TOOL_GEN    - 1)) | (1u << (TOOL_SAVE    - 1));
@@ -294,6 +298,9 @@ ISR(PCINT0_vect)
 {
   if ((PORTF & 0x0F) != 0x0F) return;   // matrix scan in progress: PB3 != status
   if (!(PINB & (1 << 3))) return;       // only rising edges
+  if (eng.PulseActive()) return;        // COMMON-TRIG crosstalk on the status
+                                        // sense: don't let a phantom edge feed
+                                        // the tempo tracker either
   clk_track_edge(micros());
 }
 
@@ -549,12 +556,31 @@ static void handle_tool(uint8_t tool, uint8_t inst) {
         }
       break;
 
-    case TOOL_PROB: {                                  // SCALE = level 0..3; step paints it (this section)
-      const uint8_t lvl = scaleDb.value & 3;           // SCALE 1 = always(0), 2..4 = rarer
-      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
-        if (stepB[b].rising()) { eng.cur().prob[base + b] = lvl; eng.mark_pat_dirty(eng.cur_pat); }
+    case TOOL_PROB:
+      // Two phases, INSTRUMENT dial picks the voice throughout. Pick: LEDs show
+      // the voice's steps (prob'd steps blink); press a step to select it (it
+      // flashes), CLEAR = wipe the voice's prob. Set: step n = the selected
+      // step fires n/16 of the time (step 16 = always), CLEAR = always; either
+      // returns to pick. GROUP still pages sections while picking.
+      if (s_prob_sel == 0xFF) {
+        for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
+          if (stepB[b].rising()) { s_prob_sel = (uint8_t)(base + b); break; }
+        if (clearB.rising()) { eng.cur().prob_clear_inst(inst & 7); eng.mark_pat_dirty(eng.cur_pat); }
+      } else {
+        for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
+          if (stepB[b].rising()) {
+            eng.cur().prob_set(inst & 7, s_prob_sel, (uint8_t)((b + 1) & 15));
+            eng.mark_pat_dirty(eng.cur_pat);
+            s_prob_sel = 0xFF;
+            break;
+          }
+        if (clearB.rising()) {
+          eng.cur().prob_set(inst & 7, s_prob_sel, 0);
+          eng.mark_pat_dirty(eng.cur_pat);
+          s_prob_sel = 0xFF;
+        }
+      }
       break;
-    }
 
     case TOOL_COPY:                                    // 1 clear, 2 copy, 3 paste (whole pattern)
       if (stepB[0].rising()) { eng.ClearPattern(eng.cur_pat); midi_send_pattern_dump(eng.cur_pat); }
@@ -591,16 +617,31 @@ static void handle_tool(uint8_t tool, uint8_t inst) {
       }
       break;
 
-    case TOOL_FLAM: {                                  // SCALE = type; step = flam that step (this section)
-      if (scaleDb.value != s_scale_ref) {              // only on a CHANGE since tool entry
-        s_scale_ref = scaleDb.value;                   // (pos 1 = off, 2..4 = 1..3 extra hits)
-        eng.cur().flam_type = scaleDb.value & 3;
-        eng.mark_pat_dirty(eng.cur_pat);
+    case TOOL_RATCHET:
+      // Two phases, INSTRUMENT dial picks the voice throughout. Pick: LEDs show
+      // the voice's steps (ratcheted steps blink); press a step to select it (it
+      // flashes), CLEAR = wipe the voice's ratchets. Set: step 1/2/3 = the
+      // selected step retriggers 2x/3x/4x (steps 4..16 also = 4x), CLEAR =
+      // single hit; either returns to pick. GROUP still pages sections.
+      if (s_ratchet_sel == 0xFF) {
+        for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
+          if (stepB[b].rising()) { s_ratchet_sel = (uint8_t)(base + b); break; }
+        if (clearB.rising()) { eng.cur().ratchet_clear_inst(inst & 7); eng.mark_pat_dirty(eng.cur_pat); }
+      } else {
+        for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
+          if (stepB[b].rising()) {
+            eng.cur().ratchet_set(inst & 7, s_ratchet_sel, (uint8_t)(b + 1));
+            eng.mark_pat_dirty(eng.cur_pat);
+            s_ratchet_sel = 0xFF;
+            break;
+          }
+        if (clearB.rising()) {
+          eng.cur().ratchet_set(inst & 7, s_ratchet_sel, 0);
+          eng.mark_pat_dirty(eng.cur_pat);
+          s_ratchet_sel = 0xFF;
+        }
       }
-      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b)
-        if (stepB[b].rising()) { eng.cur().flam_tog(base + b); eng.mark_pat_dirty(eng.cur_pat); }
       break;
-    }
 
     case TOOL_RESLICE: {                               // hold a step = loop that many steps
       uint8_t held = 0;
@@ -647,7 +688,7 @@ static void handle_tool(uint8_t tool, uint8_t inst) {
   // (global length) in TOOL_LENGTH.
   switch (tool) {
     case TOOL_LENGTH: case TOOL_ACCENT: case TOOL_PROB:
-    case TOOL_FLAM:   case TOOL_XFORM:  case TOOL_GEN: {
+    case TOOL_RATCHET:   case TOOL_XFORM:  case TOOL_GEN: {
       const uint8_t nsec = (tool == TOOL_LENGTH) ? NUM_SECTIONS
                                                  : sections_for(eng.cur().length);
       if (disp_section >= nsec) disp_section = 0;
@@ -744,7 +785,7 @@ static uint16_t build_frame(Mode mode, uint8_t inst) {
 // True for tools whose step buttons address one 16-step section at a time.
 static bool tool_uses_sections(uint8_t t) {
   return t == TOOL_LENGTH || t == TOOL_ACCENT || t == TOOL_PROB ||
-         t == TOOL_FLAM   || t == TOOL_XFORM  || t == TOOL_GEN;
+         t == TOOL_RATCHET   || t == TOOL_XFORM  || t == TOOL_GEN;
 }
 
 // Section indicator on the PATTERN GROUP I/II LEDs (one selector level, so one
@@ -802,18 +843,49 @@ static uint16_t build_tool_frame(uint8_t tool) {
       return led_bit((uint8_t)(eng.play_dir & 3));              // one of steps 1-4
     case TOOL_ACCENT:
       return eng.cur().steps[INST_ACCENT][disp_section];        // accent track, shown section
-    case TOOL_PROB: {                                           // lit = step has a chance < 100%
+    case TOOL_PROB: {
+      const uint8_t  pi = instDb.value & 7;
+      const Pattern &p  = eng.cur();
+      if (s_prob_sel == 0xFF) {          // pick: voice's steps solid, prob'd blink
+        uint16_t f  = p.steps[pi][disp_section];
+        uint16_t pm = 0;
+        for (uint8_t k = 0; k < PROB_SLOTS; ++k)
+          if (p.pstep[k] != 0xFF && (p.pval[k] >> 4) == pi && (p.pstep[k] >> 4) == disp_section)
+            pm |= led_bit((uint8_t)(p.pstep[k] & 15));
+        return blink8 ? (uint16_t)(f | pm) : (uint16_t)(f & ~pm);
+      }
+      // set: bar = the selected step's chance in 16ths (full bar = always),
+      // with the selected step's LED flashing on top of it
+      const uint8_t v = p.prob_get(pi, s_prob_sel);
+      const uint8_t n = v ? v : NUM_STEP_BTNS;
       uint16_t f = 0;
-      const uint8_t base = (uint8_t)(disp_section * NUM_STEP_BTNS);
-      for (uint8_t b = 0; b < NUM_STEP_BTNS; ++b) if (eng.cur().prob[base + b]) f |= led_bit(b);
+      for (uint8_t b = 0; b < n; ++b) f |= led_bit(b);
+      if (blink8) f ^= led_bit((uint8_t)(s_prob_sel & 15));
       return f;
     }
     case TOOL_COPY:                                             // 1 clear / 2 copy / 3 paste
       return led_bit(0) | led_bit(1) | led_bit(2);
     case TOOL_XFORM:                                            // 1 rotL / 2 rotR / 3 rev / 4 rand
       return led_bit(0) | led_bit(1) | led_bit(2) | led_bit(3);
-    case TOOL_FLAM:                                             // lit = flammed steps, shown section
-      return eng.cur().flam[disp_section];
+    case TOOL_RATCHET: {
+      const uint8_t  pi = instDb.value & 7;
+      const Pattern &p  = eng.cur();
+      if (s_ratchet_sel == 0xFF) {       // pick: voice's steps solid, ratcheted blink
+        uint16_t f  = p.steps[pi][disp_section];
+        uint16_t rm = 0;
+        for (uint8_t k = 0; k < RATCHET_SLOTS; ++k)
+          if (p.rstep[k] != 0xFF && (p.rval[k] >> 4) == pi && (p.rstep[k] >> 4) == disp_section)
+            rm |= led_bit((uint8_t)(p.rstep[k] & 15));
+        return blink8 ? (uint16_t)(f | rm) : (uint16_t)(f & ~rm);
+      }
+      // set: bar = the selected step's extra-hit count (1=2x, 2=3x, 3=4x; none =
+      // single hit), with the selected step's LED flashing on top of it
+      const uint8_t v = p.ratchet_get(pi, s_ratchet_sel);
+      uint16_t f = 0;
+      for (uint8_t b = 0; b < v; ++b) f |= led_bit(b);
+      if (blink8) f ^= led_bit((uint8_t)(s_ratchet_sel & 15));
+      return f;
+    }
     case TOOL_ARP: {                                            // bar = number of arp notes
       uint16_t f = 0;
       for (uint8_t i = 0; i < eng.arp_len && i < NUM_STEP_BTNS; ++i) f |= led_bit(i);
@@ -875,7 +947,19 @@ void loop() {
   groupB.push(panel.group());
   tapB.push(panel.write_tap());
   runB.push(panel.run());
-  clkB.push(panel.tempo_clk());
+  // The ~1.5 ms COMMON-TRIG pulse (and the instrument-data lines it strobes)
+  // couples into the gated PA status sense (see hw.h col_us note), so a PA3
+  // sample taken while a pulse is in flight can read a phantom level. The
+  // pulse spans 1-2 scan passes — enough to feed the debouncer a fake
+  // low-high-high and step the sequencer on a phantom clock edge. A dense
+  // pattern (e.g. the GEN tool's random fill) fires big voice stacks on
+  // nearly every step, so the phantom edges walked it audibly off time.
+  // Hold the clock debouncer at its last level for those samples: a real
+  // edge under the pulse is then seen a pass or two late (bounded jitter,
+  // corrected at the next clean edge) instead of firing an extra step.
+  // Checked BEFORE eng.Service() below, so this reflects the pulse state
+  // during the scan that produced the sample.
+  clkB.push(eng.PulseActive() ? (clkB.state & 1) : panel.tempo_clk());
   modeDb.update((uint8_t)panel.mode());
   instDb.update((uint8_t)panel.instrument());
   scaleDb.update(panel.scale());
@@ -1068,6 +1152,10 @@ void loop() {
   // A latched arp full of rests read as a dead machine on the bench.
   static uint8_t s_tool_prev = TOOL_NONE;
   if (s_tool_prev == TOOL_ARP && s_tool != TOOL_ARP) eng.ArpClear();
+  if (s_tool != s_tool_prev) {                    // PROB/RATCHET re-open in pick phase
+    s_prob_sel    = 0xFF;
+    s_ratchet_sel = 0xFF;
+  }
   s_tool_prev = s_tool;
 
   // 7. web-editor MIDI link, outgoing side: broadcast the selected pattern

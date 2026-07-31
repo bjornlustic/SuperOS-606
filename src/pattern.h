@@ -22,6 +22,8 @@ static constexpr uint8_t PATS_PER_GROUP = 16;   // patterns per group (PATTERN G
 static constexpr uint8_t NUM_GROUPS     = NUM_PATTERNS / PATS_PER_GROUP;  // 2
 static constexpr uint8_t NUM_TRACKS     = 8;    // selected with the INSTRUMENT dial
 static constexpr uint8_t TRACK_MAX_PATS = 64;
+static constexpr uint8_t PROB_SLOTS     = 64;   // (instrument, step, chance) slots
+static constexpr uint8_t RATCHET_SLOTS  = 16;   // (instrument, step, count) slots
 
 // SCALE switch position (0..3 = panel "1".."4") -> tempo-clock ticks per step.
 // The tempo clock runs at 24 PPQN (DIN-sync standard):
@@ -38,9 +40,20 @@ struct Pattern {
   uint8_t  length;                  // 1..64
   uint8_t  scale;                   // 0..3 (SCALE switch value at write time)
   uint8_t  swing;                   // 0 = off .. 15 = max (delays off-beat steps)
-  uint8_t  flam_type;               // 0 = off, 1..3 = number of extra sub-hits
-  uint16_t flam[NUM_SECTIONS];      // bit = step retriggers (flam/roll/ratchet)
-  uint8_t  prob[MAX_STEPS];         // per-step play chance level: 0 = always, 1..3 = rarer
+  // RATCHET: per-instrument per-step retrigger count, stored as a sparse slot
+  // table (same shape as the probability table below; a dense 8x64 grid would
+  // not fit the flash record). A slot binds (instrument, step) to a count v
+  // (1..3): the voice fires v extra times inside the step, evenly spaced, for
+  // 2x/3x/4x total. No slot = single hit. 16 slots per pattern. This replaces
+  // the old whole-step flam: each voice on a step now ratchets independently.
+  uint8_t  rstep[RATCHET_SLOTS];    // slot's step 0..63; 0xFF = slot free
+  uint8_t  rval[RATCHET_SLOTS];     // slot's (instrument << 4) | count 1..3
+  // PROBABILITY: per-instrument per-step play chance in 16ths, stored as a
+  // sparse slot table (a dense 8x64 4-bit grid would not fit a 243-byte flash
+  // record). A slot binds (instrument, step) to v: the hit fires v/16 of the
+  // time (1..15). No slot = always fires. 64 slots per pattern.
+  uint8_t  pstep[PROB_SLOTS];       // slot's step 0..63; 0xFF = slot free
+  uint8_t  pval[PROB_SLOTS];        // slot's (instrument << 4) | chance 1..15
   uint8_t  ilen[NUM_INSTRUMENTS];   // per-instrument loop length: 0 = follow the
                                     // pattern length; 1..64 = this row loops its
                                     // own length (mode per the poly bit below)
@@ -52,9 +65,11 @@ struct Pattern {
 
   void Clear() {
     memset(steps, 0, sizeof(steps));
-    length = NUM_STEP_BTNS; scale = 0; swing = 0; flam_type = 0;   // default one bar
-    memset(flam, 0, sizeof(flam));
-    memset(prob, 0, sizeof(prob));
+    length = NUM_STEP_BTNS; scale = 0; swing = 0;                  // default one bar
+    memset(rstep, 0xFF, sizeof(rstep));                           // all ratchet slots free
+    memset(rval, 0, sizeof(rval));
+    memset(pstep, 0xFF, sizeof(pstep));                            // all slots free
+    memset(pval, 0, sizeof(pval));
     memset(ilen, 0, sizeof(ilen));
     poly = 0;                                                      // default bar-reset
   }
@@ -69,17 +84,72 @@ struct Pattern {
   void step_set(uint8_t inst, uint8_t s) { steps[inst][s >> 4] |=  (uint16_t)1 << (s & 15); }
   void step_clr(uint8_t inst, uint8_t s) { steps[inst][s >> 4] &= ~((uint16_t)1 << (s & 15)); }
   void step_tog(uint8_t inst, uint8_t s) { steps[inst][s >> 4] ^=  (uint16_t)1 << (s & 15); }
-  bool flam_get(uint8_t s) const { return (flam[s >> 4] >> (s & 15)) & 1; }
-  void flam_tog(uint8_t s) { flam[s >> 4] ^= (uint16_t)1 << (s & 15); }
+  // Ratchet slots. get returns the extra-hit count (0 = none = single hit,
+  // 1..3 = 2x/3x/4x); set with v = 0 frees the slot. set returns false only
+  // when the table is full (16 slots).
+  uint8_t ratchet_get(uint8_t inst, uint8_t s) const {
+    for (uint8_t k = 0; k < RATCHET_SLOTS; ++k)
+      if (rstep[k] == s && (rval[k] >> 4) == inst) return (uint8_t)(rval[k] & 15);
+    return 0;
+  }
+  bool ratchet_set(uint8_t inst, uint8_t s, uint8_t v) {
+    if (v > 3) v = 3;
+    uint8_t free_k = 0xFF;
+    for (uint8_t k = 0; k < RATCHET_SLOTS; ++k) {
+      if (rstep[k] == s && (rval[k] >> 4) == inst) {
+        if (v) rval[k] = (uint8_t)((inst << 4) | v); else rstep[k] = 0xFF;
+        return true;
+      }
+      if (rstep[k] == 0xFF && free_k == 0xFF) free_k = k;
+    }
+    if (!v) return true;
+    if (free_k == 0xFF) return false;
+    rstep[free_k] = s;
+    rval[free_k]  = (uint8_t)((inst << 4) | v);
+    return true;
+  }
+  void ratchet_clear_inst(uint8_t inst) {
+    for (uint8_t k = 0; k < RATCHET_SLOTS; ++k)
+      if (rstep[k] != 0xFF && (rval[k] >> 4) == inst) rstep[k] = 0xFF;
+  }
+
+  // Probability slots. get returns the chance in 16ths (0 = none = always);
+  // set with v = 0 frees the slot. set returns false only when the table is
+  // full (64 slots, effectively never in practice).
+  uint8_t prob_get(uint8_t inst, uint8_t s) const {
+    for (uint8_t k = 0; k < PROB_SLOTS; ++k)
+      if (pstep[k] == s && (pval[k] >> 4) == inst) return (uint8_t)(pval[k] & 15);
+    return 0;
+  }
+  bool prob_set(uint8_t inst, uint8_t s, uint8_t v) {
+    uint8_t free_k = 0xFF;
+    for (uint8_t k = 0; k < PROB_SLOTS; ++k) {
+      if (pstep[k] == s && (pval[k] >> 4) == inst) {
+        if (v) pval[k] = (uint8_t)((inst << 4) | v); else pstep[k] = 0xFF;
+        return true;
+      }
+      if (pstep[k] == 0xFF && free_k == 0xFF) free_k = k;
+    }
+    if (!v) return true;
+    if (free_k == 0xFF) return false;
+    pstep[free_k] = s;
+    pval[free_k]  = (uint8_t)((inst << 4) | v);
+    return true;
+  }
+  void prob_clear_inst(uint8_t inst) {
+    for (uint8_t k = 0; k < PROB_SLOTS; ++k)
+      if (pstep[k] != 0xFF && (pval[k] >> 4) == inst) pstep[k] = 0xFF;
+  }
 };
 
-// steps (8*4*2=64) + length + scale + swing + flam_type + flam (4*2=8) + prob(64)
-// + ilen(8) + poly = 149. Growing this cleanly invalidates older saves: the
+// steps (8*4*2=64) + length + scale + swing + rstep(16) + rval(16)
+// + pstep(64) + pval(64) + ilen(8) + poly = 236 (fits the block store's
+// 243-byte record cap). Changing this cleanly invalidates older saves: the
 // block store's read() returns the stored length, and load only deserializes
-// when it equals PATTERN_BYTES, so shorter old records simply don't load — no
-// version byte needed.
+// when it equals PATTERN_BYTES, so mismatched old records simply don't load,
+// no version byte needed.
 static constexpr uint8_t PATTERN_BYTES =
-    NUM_INSTRUMENTS * NUM_SECTIONS * 2 + 4 + NUM_SECTIONS * 2 + MAX_STEPS + NUM_INSTRUMENTS + 1;  // 149
+    NUM_INSTRUMENTS * NUM_SECTIONS * 2 + 3 + RATCHET_SLOTS * 2 + PROB_SLOTS * 2 + NUM_INSTRUMENTS + 1;  // 236
 
 inline void serialize_pattern(const Pattern &p, uint8_t *buf) {
   uint8_t o = 0;
@@ -91,12 +161,10 @@ inline void serialize_pattern(const Pattern &p, uint8_t *buf) {
   buf[o++] = p.length;
   buf[o++] = p.scale;
   buf[o++] = p.swing;
-  buf[o++] = p.flam_type;
-  for (uint8_t s = 0; s < NUM_SECTIONS; ++s) {
-    buf[o++] = (uint8_t)(p.flam[s] & 0xFF);
-    buf[o++] = (uint8_t)(p.flam[s] >> 8);
-  }
-  for (uint8_t i = 0; i < MAX_STEPS; ++i) buf[o++] = p.prob[i];
+  for (uint8_t i = 0; i < RATCHET_SLOTS; ++i) buf[o++] = p.rstep[i];
+  for (uint8_t i = 0; i < RATCHET_SLOTS; ++i) buf[o++] = p.rval[i];
+  for (uint8_t i = 0; i < PROB_SLOTS; ++i) buf[o++] = p.pstep[i];
+  for (uint8_t i = 0; i < PROB_SLOTS; ++i) buf[o++] = p.pval[i];
   for (uint8_t i = 0; i < NUM_INSTRUMENTS; ++i) buf[o++] = p.ilen[i];
   buf[o++] = p.poly;
 }
@@ -111,12 +179,24 @@ inline void deserialize_pattern(Pattern &p, const uint8_t *buf) {
   p.length    = buf[o++];
   p.scale     = buf[o++];
   p.swing     = buf[o++];
-  p.flam_type = buf[o++];
-  for (uint8_t s = 0; s < NUM_SECTIONS; ++s) {
-    p.flam[s] = (uint16_t)buf[o] | ((uint16_t)buf[o + 1] << 8);
-    o += 2;
+  for (uint8_t i = 0; i < RATCHET_SLOTS; ++i) p.rstep[i] = buf[o++];
+  for (uint8_t i = 0; i < RATCHET_SLOTS; ++i) p.rval[i]  = buf[o++];
+  for (uint8_t i = 0; i < RATCHET_SLOTS; ++i) {
+    // Sanitize: a used slot needs a valid step, a real instrument and a
+    // non-zero count; anything else (e.g. an editor-zeroed blob) frees it.
+    if (p.rstep[i] == 0xFF) continue;
+    if (p.rstep[i] >= MAX_STEPS || (p.rval[i] >> 4) >= NUM_INSTRUMENTS || !(p.rval[i] & 15))
+      p.rstep[i] = 0xFF;
   }
-  for (uint8_t i = 0; i < MAX_STEPS; ++i) p.prob[i] = buf[o++] & 3;
+  for (uint8_t i = 0; i < PROB_SLOTS; ++i) p.pstep[i] = buf[o++];
+  for (uint8_t i = 0; i < PROB_SLOTS; ++i) p.pval[i]  = buf[o++];
+  for (uint8_t i = 0; i < PROB_SLOTS; ++i) {
+    // Sanitize: a used slot needs a valid step, a real instrument and a
+    // non-zero chance; anything else (e.g. an editor-zeroed blob) frees it.
+    if (p.pstep[i] == 0xFF) continue;
+    if (p.pstep[i] >= MAX_STEPS || (p.pval[i] >> 4) >= NUM_INSTRUMENTS || !(p.pval[i] & 15))
+      p.pstep[i] = 0xFF;
+  }
   for (uint8_t i = 0; i < NUM_INSTRUMENTS; ++i) {
     p.ilen[i] = buf[o++];
     if (p.ilen[i] > MAX_STEPS) p.ilen[i] = 0;   // invalid -> follow pattern length
@@ -125,7 +205,6 @@ inline void deserialize_pattern(Pattern &p, const uint8_t *buf) {
   if (p.length < 1 || p.length > MAX_STEPS) p.length = NUM_STEP_BTNS;
   if (p.scale > 3) p.scale = 0;
   if (p.swing > 15) p.swing = 0;
-  if (p.flam_type > 3) p.flam_type = 0;
 }
 
 struct Track {

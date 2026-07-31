@@ -5,13 +5,13 @@
 // uses. Command spaces don't collide: the bootloader owns 0x01/0x02 (and only
 // runs at boot), the app owns 0x10+.
 //
-// Patterns (18 bytes, see pattern.h) and tracks (65 bytes) travel 7-bit packed
+// Patterns (213 bytes, see pattern.h) and tracks (65 bytes) travel 7-bit packed
 // (bootloader scheme: 7 data bytes -> 1 MSB byte + 7 low-7-bit bytes) with an
 // XOR checksum of the raw bytes sent as two 7-bit values (lo7, hi-bit).
 //
 //   editor -> 606
 //     F0 7D 10 <pat 0-31> F7                              request pattern
-//     F0 7D 12 <pat> <xor_lo> <xor_hi> <21B packed> F7    push pattern
+//     F0 7D 12 <pat> <xor_lo> <xor_hi> <244B packed> F7    push pattern
 //     F0 7D 1A <n 1-16> <p0..pn-1> F7                     select range chain
 //     F0 7D 1D <pat 0-31> F7                              select pattern
 //     F0 7D 24 <trk 0-7> F7                               request track
@@ -19,7 +19,7 @@
 //     F0 7D 30 F7                                         request settings
 //     F0 7D 32 <chan 0-16> <clk 0-1> <out 0-1> F7         set settings
 //   606 -> editor
-//     F0 7D 11 <pat> <xor_lo> <xor_hi> <21B packed> F7    pattern dump
+//     F0 7D 11 <pat> <xor_lo> <xor_hi> <244B packed> F7    pattern dump
 //     F0 7D 14 <status> F7                                push ack (0 = ok)
 //     F0 7D 15 <pat 0-31> F7                              pattern-start anchor (running)
 //     F0 7D 16 <pat> <inst 0-7> <step 0-15> <on 0|1> F7   panel step edit
@@ -106,7 +106,7 @@ void midi_tx_service(Engine &eng);
 /// stop) should keep bypassing the queue — the MIDI spec lets them interleave
 /// anywhere, and they must not wait behind a queued pattern dump.
 /// Returns false if the queue is full (the message is dropped).
-bool midi_tx_msg(const uint8_t *msg, uint8_t len);
+bool midi_tx_msg(const uint8_t *msg, uint16_t len);
 
 /// Broadcast the pattern-start anchor (SysEx 0x15). Call at every pattern
 /// start (step 0 fire) while running; the editor re-anchors its clock-derived
