@@ -4,16 +4,11 @@
 .DS_Store
 .vscode/
 docs/
-# release artifacts ARE tracked (except with-ROM kits: the D650C mask ROM is
-# copyrighted and must never enter the repo)
-!release/**
-release/*-with-rom/
-# personal with-ROM kits, wherever they sit under release/: the msw folders,
-# their zips, any *with-rom* image, and the raw mask-ROM syx
-release/*msw*
-release/**/*with-rom*
-release/**/tr606-mask-rom*
+.claude/
+# the whole release tree stays out of git (kits ship outside the repo; the
+# with-ROM builds especially: the D650C mask ROM is copyrighted and must
+# never enter the repo)
+release/
 # personal ROM-embedded builds: generated header, copyrighted contents
 src/d650/rom_embed.h
-# (release/** negation above must not resurrect these)
 **/.DS_Store
