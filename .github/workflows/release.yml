@@ -1,0 +1,56 @@
+# Auto-build a GitHub Release when a release tag is pushed (e.g. 0.5a).
+# Builds the bootloader + SPM flash service + combined firmware, then attaches
+# the MIDI-bootloader .syx (app + flash service) and the full ISP .hex
+# (app + bootloader + flash service). Release notes are the ANNOTATED TAG
+# MESSAGE, so the changelog lives on the releases page, not as a repo file:
+#   git tag -a 0.5a -F notes.md --cleanup=verbatim && git push origin 0.5a
+#
+# Only the plain `combined` env is built here: the ROM-embedded env needs the
+# gitignored rom_embed.h and must never be built or published from CI.
+name: release
+
+on:
+  push:
+    tags:
+      - '[0-9]*a'
+      - 'v[0-9]*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio intelhex
+
+      - name: Build bootloader + flash service
+        run: pio run -e bootloader -e flash-service
+
+      - name: Build firmware (packs .syx + full .hex)
+        run: pio run -e combined
+
+      - name: Release notes from the annotated tag message
+        run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          if ! [ -s notes.md ]; then echo "Firmware release $GITHUB_REF_NAME." > notes.md; fi
+
+      - name: Create release with firmware assets
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            SuperOS-606_v*_combined_*.syx \
+            SuperOS-606_v*_combined_*-full.hex \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md
